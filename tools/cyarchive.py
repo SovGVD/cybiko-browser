@@ -157,8 +157,9 @@ MAX_MATCH = 256
 
 
 def cy_pack(data):
-    """Compress with CyOS method 2 (greedy LZ77). A back reference reaches
-    `length` to `length` + 8191 bytes back, so it never overlaps itself."""
+    """Compress with CyOS method 2 (greedy LZ77). The format could reach
+    `length` + 8191 bytes back, but CyOS's decoder keeps only an 8 KB window,
+    so references stay within 8191 bytes. They never overlap themselves."""
     bits = []
     heads = {}
     i, n = 0, len(data)
@@ -171,16 +172,16 @@ def cy_pack(data):
         best_len, best_dist = 0, 0
         for j in reversed(heads.get(data[i:i + 3], ())[-48:]):
             dist = i - j
-            if dist > 8191 + MAX_MATCH:
+            if dist > 8191:
                 break
             limit = min(MAX_MATCH, dist, n - i)
-            if limit <= best_len or dist - limit > 8191 and dist - min(limit, best_len + 1) > 8191:
+            if limit <= best_len:
                 continue
             k = 0
             while k < limit and data[j + k] == data[i + k]:
                 k += 1
             k = min(k, limit)
-            if k >= 2 and dist - k <= 8191 and k > best_len:
+            if k >= 2 and k > best_len:
                 best_len, best_dist = k, dist
                 if k == MAX_MATCH:
                     break
