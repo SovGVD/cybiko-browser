@@ -1,3 +1,90 @@
+diff --git a/src/components/cybiko/cy_internal.h b/src/components/cybiko/cy_internal.h
+index a243de6..0bc43b3 100644
+--- a/src/components/cybiko/cy_internal.h
++++ b/src/components/cybiko/cy_internal.h
+@@ -53,6 +53,7 @@ void cy_disk_console(cybiko_t *m, uint8_t b);
+ void cy_rf_reset(cybiko_t *m);
+ void cy_rf_h8_byte(cybiko_t *m, uint8_t b);
+ void cy_rf_advance(cybiko_t *m);
++uint16_t cy_rf_rssi(const cybiko_t *m);
+ uint32_t cy_rf_next(const cybiko_t *m);
+ void cy_disk_write8(cybiko_t *m, uint32_t off, uint8_t v);
+ 
+diff --git a/src/components/cybiko/cy_periph.c b/src/components/cybiko/cy_periph.c
+index 58077bf..693d278 100644
+--- a/src/components/cybiko/cy_periph.c
++++ b/src/components/cybiko/cy_periph.c
+@@ -754,7 +754,8 @@ static void adc_advance(cybiko_t *m, uint32_t states)
+         states -= m->adc_left;
+         m->adc_left = 0;
+         int ch = m->adc_ch;
+-        uint16_t val = ch == 3 ? cy_cart_adc(m, ch) : m->host.adc_read ? m->host.adc_read(m->host.user, ch) : 0;
++        uint16_t val = ch == 3 ? cy_cart_adc(m, ch) : ch == 0 ? cy_rf_rssi(m)
++                       : m->host.adc_read ? m->host.adc_read(m->host.user, ch) : 0;
+         m->addr[ch & 3] = val & 0x3ff;
+         bool scan = m->adcsr & 0x10;
+         int end = m->adcsr & 7;
+diff --git a/src/components/cybiko/cy_rf.c b/src/components/cybiko/cy_rf.c
+index 581a71e..77df61d 100644
+--- a/src/components/cybiko/cy_rf.c
++++ b/src/components/cybiko/cy_rf.c
+@@ -36,6 +36,10 @@
+ #define CRC_OFFSET 0x7fffcu
+ #define SPARE 1                       /* extra byte at the end of each TX frame */
+ #define ACK_DELAY (CY_CLOCK_HZ / 500) /* 2 ms from the last byte to the 03 */
++/* A heard packet reaches the H8S at the speed it comes over the air, not
++ * at the SCI's: CyOS reads the signal strength 15 ms after the first byte
++ * and expects the last one within 50 ms (short) or 115 ms (long). */
++#define AIR_BYTE (CY_CLOCK_HZ / 2400)
+ 
+ enum { P_IDLE, P_CMD, P_ARGS, P_DATA };
+ 
+@@ -116,6 +120,14 @@ bool cybiko_rf_receive(cybiko_t *m, const uint8_t *pkt, size_t len, uint8_t chan
+     return true;
+ }
+ 
++/* A/D channel 0 is the radio's signal strength. CyOS samples it while a
++ * packet comes in and picks the gate it hears best, so a packet coming in
++ * shows a good signal and the quiet air a low one. */
++uint16_t cy_rf_rssi(const cybiko_t *m)
++{
++    return m->rf.inject_len ? 450 : 30;
++}
++
+ /* Hand packets to the H8S when it is listening and not busy sending, and
+  * acknowledge sent ones. */
+ void cy_rf_advance(cybiko_t *m)
+@@ -136,11 +148,15 @@ void cy_rf_advance(cybiko_t *m)
+             memcpy(r->inject + 1, r->q[slot], len);
+             r->inject_len = (uint16_t)(len + 1);
+             r->inject_pos = 0;
++            r->inject_at = now(m);
+             r->heard++;
+         }
+     }
+-    while (r->inject_pos < r->inject_len && cybiko_serial_rx(m, 2, r->inject[r->inject_pos]))
++    while (r->inject_pos < r->inject_len && (int32_t)(now(m) - r->inject_at) >= 0 &&
++           cybiko_serial_rx(m, 2, r->inject[r->inject_pos])) {
+         r->inject_pos++;
++        r->inject_at += AIR_BYTE;
++    }
+     if (r->inject_pos >= r->inject_len) r->inject_len = r->inject_pos = 0;
+ }
+ 
+@@ -151,8 +167,12 @@ uint32_t cy_rf_next(const cybiko_t *m)
+         int32_t d = (int32_t)(r->ack_at - now(m));
+         return d > 0 ? (uint32_t)d : 1;
+     }
++    if (r->inject_len) {
++        int32_t d = (int32_t)(r->inject_at - now(m));
++        return d > 0 ? (uint32_t)d : 1;
++    }
+     /* Look again every millisecond while a packet waits for its turn. */
+-    if (r->queued || r->inject_len) return CY_CLOCK_HZ / 1000;
++    if (r->queued) return CY_CLOCK_HZ / 1000;
+     return 0xffffffffu;
+ }
+ 
 diff --git a/src/components/cybiko/cybiko.c b/src/components/cybiko/cybiko.c
 index 725b6c3..50eb71e 100644
 --- a/src/components/cybiko/cybiko.c
@@ -42,7 +129,7 @@ index 725b6c3..50eb71e 100644
  {
      const cy_lcd_t *l = &m->lcd;
 diff --git a/src/components/cybiko/include/cybiko.h b/src/components/cybiko/include/cybiko.h
-index 2910d0f..43fa7ee 100644
+index 2910d0f..7a03654 100644
 --- a/src/components/cybiko/include/cybiko.h
 +++ b/src/components/cybiko/include/cybiko.h
 @@ -92,6 +92,11 @@ typedef struct {
@@ -57,7 +144,15 @@ index 2910d0f..43fa7ee 100644
  } cy_host_t;
  
  /* ---- peripheral state (internal, visible for tests and save states) ---- */
-@@ -280,6 +285,7 @@ typedef struct cybiko {
+@@ -173,6 +178,7 @@ typedef struct {
+     uint8_t q_head, queued;
+     uint8_t inject[1 + CY_RF_LONG];            /* packet being handed to SCI2 */
+     uint16_t inject_len, inject_pos;
++    uint32_t inject_at;                        /* when its next byte arrives */
+     uint8_t id_orig[4], crc_orig[4];           /* flash bytes before cybiko_set_unit_id */
+     bool id_applied;
+     uint32_t sent, heard;                      /* packets, for diagnostics */
+@@ -280,6 +286,7 @@ typedef struct cybiko {
      uint32_t unmapped_reads, unmapped_writes, illegal_ops;
      uint32_t dtc_dma_use;      /* DMA transfers started by the DREQ pins (not wired) */
      uint32_t wdt_resets;
@@ -65,7 +160,7 @@ index 2910d0f..43fa7ee 100644
  } cybiko_t;
  
  /* Set up a machine on caller-owned memory: rom is CY_ROM_BUF bytes with the
-@@ -316,6 +322,26 @@ uint32_t cybiko_unit_id(const cybiko_t *m);
+@@ -316,6 +323,26 @@ uint32_t cybiko_unit_id(const cybiko_t *m);
  /* Undo the ID change in a copy of the flash about to be saved. */
  void cybiko_flash_original(const cybiko_t *m, uint8_t *copy);
  
@@ -93,31 +188,42 @@ index 2910d0f..43fa7ee 100644
   * CY_LCD_H, row 0 at the top. Returns lcd.version so callers can skip
   * unchanged frames. */
 diff --git a/src/components/cybiko_app/CMakeLists.txt b/src/components/cybiko_app/CMakeLists.txt
-index 5f3e6ec..6784711 100644
+index 5f3e6ec..eb5e26a 100644
 --- a/src/components/cybiko_app/CMakeLists.txt
 +++ b/src/components/cybiko_app/CMakeLists.txt
 @@ -1,6 +1,6 @@
  idf_component_register(
 -    SRCS "cybiko_files.c" "cybiko_app.c" "cybiko_ui.c" "cybiko_link.c" "cybiko_cart.c"
-+    SRCS "cybiko_files.c" "cybiko_app.c" "cybiko_ui.c" "cybiko_link.c" "cybiko_cart.c" "cybiko_browser.c"
++    SRCS "cybiko_files.c" "cybiko_app.c" "cybiko_ui.c" "cybiko_link.c" "cybiko_cart.c" "cybiko_browser.c" "cybiko_gate.c"
      INCLUDE_DIRS "include"
 -    REQUIRES m5_sd display cybiko
 +    REQUIRES m5_sd display cybiko cy_browser
      PRIV_REQUIRES input board config audio cy_mp3 cy_vfat heap esp_timer esp_wifi esp_netif esp_event nvs_flash
  )
 diff --git a/src/components/cybiko_app/cybiko_app.c b/src/components/cybiko_app/cybiko_app.c
-index 727be66..868bd66 100644
+index 727be66..567da46 100644
 --- a/src/components/cybiko_app/cybiko_app.c
 +++ b/src/components/cybiko_app/cybiko_app.c
-@@ -29,6 +29,7 @@
+@@ -18,7 +18,8 @@
+  *                is empty
+  *   cybiko.cfg   optional settings: sound.volume = 0-100 (default 60),
+  *                disk.size = 1-6 (MB, default 4), the radio keys described
+- *                in cybiko_link.h and the cartridge key in cybiko_cart.h */
++ *                in cybiko_link.h, the cartridge key in cybiko_cart.h and
++ *                the WAP gate keys in cybiko_gate.h */
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -29,6 +30,8 @@
  #include "cybiko_ui.h"
  #include "cybiko_link.h"
  #include "cybiko_cart.h"
 +#include "cybiko_browser.h"
++#include "cybiko_gate.h"
  #include "cybiko.h"
  #include "display.h"
  #include "m5_sd.h"
-@@ -110,6 +111,15 @@ static int64_t wall_time(void *user)
+@@ -110,6 +113,15 @@ static int64_t wall_time(void *user)
  /* CPU task                                                            */
  /* ------------------------------------------------------------------ */
  
@@ -133,13 +239,20 @@ index 727be66..868bd66 100644
  static void cpu_task(void *arg)
  {
      (void)arg;
-@@ -131,6 +141,13 @@ static void cpu_task(void *arg)
+@@ -127,10 +139,20 @@ static void cpu_task(void *arg)
+         key_event_t ev;
+         while (xQueueReceive(key_queue, &ev, 0) == pdTRUE) cybiko_key(machine, ev.key, ev.down);
+         cybiko_link_poll(machine);
++        cybiko_gate_poll(machine);
+         cybiko_cart_poll(machine);
  
          int64_t run_start = esp_timer_get_time();
          cybiko_run(machine, CHUNK_STATES);
 +        if (cybiko_browser_requested()) {
 +            /* CyOS waits in the launcher while the browser runs */
++            cybiko_gate_pause(true);
 +            cybiko_browser_run(machine, flash, next_key);
++            cybiko_gate_pause(false);
 +            t0 = esp_timer_get_time();
 +            c0 = machine->cpu.cycles;
 +            last_yield = t0;
@@ -147,7 +260,7 @@ index 727be66..868bd66 100644
  
          int64_t now = esp_timer_get_time();
          /* Every 5 s: how fast the emulation runs against real time, and how
-@@ -469,6 +486,9 @@ static bool load_disk(const char *cfg)
+@@ -469,6 +491,9 @@ static bool load_disk(const char *cfg)
          ESP_LOGI(TAG, "RAM disk restored (%u KB file)", (unsigned)(have >> 10));
  
      int copied = install_apps();
@@ -157,15 +270,20 @@ index 727be66..868bd66 100644
      /* Rewrite the whole file when it is new, has grown or got apps; later
       * saves only patch changed chunks into it. */
      if (copied || have != disk_size) {
-@@ -528,7 +548,7 @@ void cybiko_app_start(void)
+@@ -528,11 +553,12 @@ void cybiko_app_start(void)
      if (audio_init((uint8_t)volume) != ESP_OK) ESP_LOGW(TAG, "no sound");
  
      cy_host_t host = { .serial_tx = on_serial_tx, .wall_time = wall_time, .speaker = on_speaker,
 -                       .rf_send = cybiko_link_send };
-+                       .rf_send = cybiko_link_send, .app_call = cybiko_browser_app_call };
++                       .rf_send = cybiko_gate_send, .app_call = cybiko_browser_app_call };
      cybiko_init(machine, &host, rom, flash, ram);
      cybiko_set_disk(machine, disk, disk_size);
      memcpy(ram, disk, CY_RAMDISK_SIZE);         /* in case the disk cannot be moved */
+     cybiko_link_init(machine, have_cfg ? cfg : NULL);
++    cybiko_gate_init(machine, have_cfg ? cfg : NULL);
+     cybiko_cart_init(machine, have_cfg ? cfg : NULL);
+ 
+     key_queue = xQueueCreate(32, sizeof(key_event_t));
 diff --git a/src/components/cybiko_app/cybiko_browser.c b/src/components/cybiko_app/cybiko_browser.c
 new file mode 100644
 index 0000000..d7fbdf8
@@ -306,6 +424,160 @@ index 0000000..d7fbdf8
 +    cybiko_link_resume();
 +    ESP_LOGI(TAG, "closed");
 +}
+diff --git a/src/components/cybiko_app/cybiko_gate.c b/src/components/cybiko_app/cybiko_gate.c
+new file mode 100644
+index 0000000..7acec4e
+--- /dev/null
++++ b/src/components/cybiko_app/cybiko_gate.c
+@@ -0,0 +1,118 @@
++/* The CyWIG on the board (see cybiko_gate.h). */
++#include <string.h>
++#include "cybiko_gate.h"
++#include "cybiko_link.h"
++#include "cy_gate.h"
++#include "cyb_net_esp.h"
++#include "palm_config.h"
++#include "esp_log.h"
++#include "esp_heap_caps.h"
++#include "esp_timer.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/queue.h"
++#include "freertos/task.h"
++
++static const char *TAG = "cywig";
++
++/* Pages are parsed on the gate's task: it needs the browser's deep stack.
++ * The stack may be in PSRAM (the gate never writes flash). */
++#define GATE_STACK 16384
++
++typedef struct {
++    uint8_t len, channel;
++    uint8_t data[CY_RF_LONG];
++} packet_t;
++
++static cy_gate_t *gate;
++static QueueHandle_t to_gate, to_machine;
++static volatile bool pause_req, paused;
++static char home[256];
++
++static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
++
++static void gate_rf(void *user, const uint8_t *pkt, size_t len, uint8_t ch)
++{
++    (void)user;
++    packet_t p = { .len = (uint8_t)len, .channel = ch };
++    memcpy(p.data, pkt, len);
++    if (xQueueSend(to_machine, &p, pdMS_TO_TICKS(20)) != pdTRUE) ESP_LOGW(TAG, "packet for the Cybiko dropped");
++}
++
++static void gate_log(void *user, const char *line)
++{
++    (void)user;
++    ESP_LOGI(TAG, "%s", line);
++}
++
++static void gate_task(void *arg)
++{
++    uint32_t id = (uint32_t)(uintptr_t)arg;
++    static cyb_net_t net;
++    cyb_net_esp(&net);
++    cy_gate_host_t host = { .rf_send = gate_rf, .log = gate_log };
++    gate = cy_gate_create(id, &host, &net);
++    if (!gate) { ESP_LOGE(TAG, "out of memory"); vTaskDelete(NULL); return; }
++    if (home[0]) cy_gate_set_home(gate, home);
++    ESP_LOGI(TAG, "gate %08lx on the radio", (unsigned long)id);
++    uint32_t wait = 0;
++    for (;;) {
++        if (pause_req) {
++            cy_gate_cancel(gate);
++            paused = true;
++            while (pause_req) vTaskDelay(pdMS_TO_TICKS(20));
++            paused = false;
++        }
++        packet_t p;
++        if (xQueueReceive(to_gate, &p, pdMS_TO_TICKS(wait > 50 ? 50 : wait)) == pdTRUE) {
++            cy_gate_rf_in(gate, p.data, p.len, p.channel);
++            while (xQueueReceive(to_gate, &p, 0) == pdTRUE) cy_gate_rf_in(gate, p.data, p.len, p.channel);
++        }
++        wait = cy_gate_poll(gate, now_ms());
++        if (!wait) wait = 1;
++    }
++}
++
++void cybiko_gate_init(cybiko_t *m, const char *cfg)
++{
++    char value[16] = "on";
++    if (cfg) config_get_value(cfg, "wap.gate", value, sizeof value);
++    if (!strcmp(value, "off")) { ESP_LOGI(TAG, "no gate (wap.gate = off)"); return; }
++    if (cfg) config_get_value(cfg, "wap.home", home, sizeof home);
++    to_gate = xQueueCreate(8, sizeof(packet_t));
++    to_machine = xQueueCreate(8, sizeof(packet_t));
++    if (!to_gate || !to_machine) { ESP_LOGE(TAG, "out of memory"); return; }
++    /* an ID of its own: the machine's with another first byte */
++    uint32_t id = cybiko_unit_id(m) ^ 0x01000000u;
++    TaskHandle_t task;
++    if (xTaskCreatePinnedToCore(gate_task, "cywig", GATE_STACK, (void *)(uintptr_t)id, 3, &task, 0) != pdPASS &&
++        xTaskCreatePinnedToCoreWithCaps(gate_task, "cywig", GATE_STACK, (void *)(uintptr_t)id, 3, &task, 0,
++                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
++        ESP_LOGE(TAG, "no memory for the gate task");
++}
++
++void cybiko_gate_send(void *user, const uint8_t *pkt, size_t len, uint8_t channel)
++{
++    cybiko_link_send(user, pkt, len, channel);
++    if (!to_gate) return;
++    packet_t p = { .len = (uint8_t)len, .channel = channel };
++    memcpy(p.data, pkt, len);
++    xQueueSend(to_gate, &p, 0);
++}
++
++void cybiko_gate_poll(cybiko_t *m)
++{
++    if (!to_machine) return;
++    packet_t p;
++    while (xQueuePeek(to_machine, &p, 0) == pdTRUE) {
++        if (!cybiko_rf_receive(m, p.data, p.len, p.channel)) break;    /* full: next time */
++        xQueueReceive(to_machine, &p, 0);
++    }
++}
++
++void cybiko_gate_pause(bool pause)
++{
++    if (!to_gate) return;
++    pause_req = pause;
++    if (!pause) return;
++    for (int i = 0; i < 100 && !paused && gate; i++) vTaskDelay(pdMS_TO_TICKS(10));
++}
+diff --git a/src/components/cybiko_app/cybiko_gate.h b/src/components/cybiko_app/cybiko_gate.h
+new file mode 100644
+index 0000000..168a80a
+--- /dev/null
++++ b/src/components/cybiko_app/cybiko_gate.h
+@@ -0,0 +1,24 @@
++#pragma once
++#include <stdbool.h>
++/* The Cybiko Wireless Internet Gate (CyWIG) on the board, for the Xtreme's
++ * own WAP browser. The gate itself is in the cybiko-browser project
++ * (cy_gate.h): one more Cybiko on the emulated radio that fetches pages
++ * over the board's Wi-Fi (the networks set up in the Browser) and hands
++ * them to the WAP browser as WML. It runs in a task of its own and talks
++ * to the board's emulated Cybiko only (not over ESP-NOW). Keys in
++ * /Cybiko/cybiko.cfg:
++ *   wap.gate = on      # default; "off": no gate
++ *   wap.home = URL     # the page the WAP browser's Home opens (default:
++ *                      # the gate's own, with a search box and a few sites) */
++#include <stddef.h>
++#include <stdint.h>
++#include "cybiko.h"
++
++/* After cybiko_link_init (the gate takes an ID next to the machine's). */
++void cybiko_gate_init(cybiko_t *m, const char *cfg);
++/* The machine's rf_send hook, with cybiko_link_send (CPU task). */
++void cybiko_gate_send(void *user, const uint8_t *pkt, size_t len, uint8_t channel);
++/* CPU task: hand the gate's packets to the machine. */
++void cybiko_gate_poll(cybiko_t *m);
++/* Stop using the network (the web browser needs it) or go on again. */
++void cybiko_gate_pause(bool pause);
 diff --git a/src/components/cybiko_app/cybiko_link.c b/src/components/cybiko_app/cybiko_link.c
 index 26ed3e4..57fb2f9 100644
 --- a/src/components/cybiko_app/cybiko_link.c
@@ -441,10 +713,10 @@ index d043193..794b96f 100644
      target_compile_options(test_cybiko PRIVATE -O2 -Wall -Wextra)
      target_compile_options(cybiko_host PRIVATE -O2 -Wall -Wextra)
 diff --git a/src/host/cybiko_host.c b/src/host/cybiko_host.c
-index 8f1390b..881f295 100644
+index 8f1390b..34639cc 100644
 --- a/src/host/cybiko_host.c
 +++ b/src/host/cybiko_host.c
-@@ -20,6 +20,12 @@
+@@ -20,6 +20,16 @@
   *   --blit-fuzz N      (built with -DCY_HLE_CHECK) at the end, check N random
   *                      calls of the native ROM blit against the original
   *                      (checked every 100 ms of emulated time)
@@ -454,10 +726,14 @@ index 8f1390b..881f295 100644
 + *                      close it; its screens go to --frames too. Pages come
 + *                      through the curl program
 + *   --browse-url URL   the page the browser opens first (default its home)
++ *   --gate             (built with the browser) a Cybiko Internet Gate (CyWIG)
++ *                      on the radio for CyOS's WAP browser, fetching through
++ *                      curl
++ *   --gate-home URL    (after --gate) the page the WAP browser's Home opens
   *   --press KEY@MS[:D] hold KEY for D ms (default 200) from MS milliseconds; KEY is
   *                      a letter, f1-f7, enter, esc, space, up/down/left/right,
   *                      select, del, tab, ins, menu, shift, fn, help, dot, comma,
-@@ -43,6 +49,10 @@
+@@ -43,6 +53,10 @@
  #endif
  #include "cy_mp3.h"
  #include "cy_vfat.h"
@@ -468,7 +744,37 @@ index 8f1390b..881f295 100644
  
  static const struct { const char *name; int key; } key_names[] = {
      { "a", CYK_A }, { "b", CYK_B }, { "c", CYK_C }, { "d", CYK_D }, { "e", CYK_E },
-@@ -200,6 +210,16 @@ static void on_rf(void *user, const uint8_t *pkt, size_t len, uint8_t channel)
+@@ -191,15 +205,46 @@ static void mp3_pump(cybiko_t *m, cy_mp3_t *d, FILE *wav)
+ /* --pair: a second machine on the same radio channel */
+ static cybiko_t *machines[2];
+ 
++#ifdef CY_WITH_BROWSER
++#include "cy_gate.h"
++/* --gate: a virtual CyWIG on the radio */
++static cy_gate_t *gate;
++
++static void gate_rf(void *user, const uint8_t *pkt, size_t len, uint8_t ch)
++{
++    (void)user;
++    if (machines[0] && !cybiko_rf_receive(machines[0], pkt, len, ch)) fprintf(stderr, "gate: radio queue full\n");
++}
++
++static void gate_log(void *user, const char *line)
++{
++    (void)user;
++    fprintf(stderr, "[%.3f gate] %s\n", machines[0] ? (double)machines[0]->cpu.cycles / CY_CLOCK_HZ : 0.0, line);
++}
++#endif
++
+ static void on_rf(void *user, const uint8_t *pkt, size_t len, uint8_t channel)
+ {
+     int from = (int)(intptr_t)user;
+     cybiko_t *to = machines[!from];
+     if (to) cybiko_rf_receive(to, pkt, len, channel);
++#ifdef CY_WITH_BROWSER
++    if (gate) cy_gate_rf_in(gate, pkt, len, channel);
++#endif
+ }
  
  static int64_t wall(void *user) { (void)user; return (int64_t)time(NULL); }
  
@@ -485,7 +791,7 @@ index 8f1390b..881f295 100644
  static uint8_t *load(const char *path, size_t want, size_t *got, bool exact)
  {
      FILE *f = fopen(path, "rb");
-@@ -234,6 +254,58 @@ static int key_by_name(const char *s)
+@@ -234,6 +279,58 @@ static int key_by_name(const char *s)
      return -1;
  }
  
@@ -544,7 +850,7 @@ index 8f1390b..881f295 100644
  int main(int argc, char **argv)
  {
      const char *rom_path = NULL, *flash_path = NULL, *ramdisk_path = NULL;
-@@ -248,7 +320,7 @@ int main(int argc, char **argv)
+@@ -248,7 +345,7 @@ int main(int argc, char **argv)
      double seconds = 20;
      unsigned disk_kb = 0;
      bool ls = false, cart = false, cart_log = false;
@@ -553,7 +859,7 @@ index 8f1390b..881f295 100644
      for (int i = 1; i < argc; i++) {
          const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
          if (!strcmp(a, "--rom") && v) { rom_path = v; i++; }
-@@ -268,6 +340,8 @@ int main(int argc, char **argv)
+@@ -268,9 +365,20 @@ int main(int argc, char **argv)
          else if (!strcmp(a, "--card") && v) { card_path = v; cart = true; i++; }
          else if (!strcmp(a, "--cart-log")) cart = cart_log = true;
          else if (!strcmp(a, "--wav") && v) { wav_path = v; i++; }
@@ -562,7 +868,19 @@ index 8f1390b..881f295 100644
          else if (!strcmp(a, "--dump-ram") && v) { dump = v; i++; }
          else if (!strcmp(a, "--hex-port") && v) { hex_port = atoi(v); i++; }
          else if (!strcmp(a, "--pair") && v) { pair_path = v; i++; }
-@@ -339,7 +413,8 @@ int main(int argc, char **argv)
++#ifdef CY_WITH_BROWSER
++        else if (!strcmp(a, "--gate")) {
++            static cyb_net_t gate_net;
++            cyb_net_curl(&gate_net, NULL);
++            cy_gate_host_t gh = { .rf_send = gate_rf, .log = gate_log };
++            gate = cy_gate_create(0x4c80c0deu, &gh, &gate_net);
++        }
++        else if (!strcmp(a, "--gate-home") && v && gate) { cy_gate_set_home(gate, v); i++; }
++#endif
+         else if (!strcmp(a, "--press-both")) press_both = true;
+         else if (!strcmp(a, "--unit-id") && v) { unit_id = (uint32_t)strtoul(v, NULL, 16); i++; }
+         else if (!strcmp(a, "--trace-io") && v) {
+@@ -339,7 +447,8 @@ int main(int argc, char **argv)
  
      static cybiko_t m, m2;
      cy_host_t host = { .user = (void *)0, .serial_tx = on_tx, .wall_time = wall, .rf_send = on_rf,
@@ -572,7 +890,23 @@ index 8f1390b..881f295 100644
      cybiko_init(&m, &host, rom, flash, ram);
      if (disk_kb) cybiko_set_disk(&m, disk, disk_size);
      if (unit_id) cybiko_set_unit_id(&m, unit_id);
-@@ -448,6 +523,16 @@ int main(int argc, char **argv)
+@@ -444,10 +553,32 @@ int main(int argc, char **argv)
+                 cybiko_run(&m, n);
+                 cybiko_run(&m2, n);
+             }
++        } else if (0
++#ifdef CY_WITH_BROWSER
++                   || gate
++#endif
++                   ) {
++#ifdef CY_WITH_BROWSER
++            for (int32_t d = 0; d < step; d += CY_CLOCK_HZ / 1000) {
++                int32_t n = step - d < (int32_t)(CY_CLOCK_HZ / 1000) ? step - d : (int32_t)(CY_CLOCK_HZ / 1000);
++                cybiko_run(&m, n);
++                cy_gate_poll(gate, (uint32_t)(m.cpu.cycles / (CY_CLOCK_HZ / 1000)));
++            }
++#endif
+         } else {
              cybiko_run(&m, step);
          }
          if (mp3) mp3_pump(&m, mp3, wav);
