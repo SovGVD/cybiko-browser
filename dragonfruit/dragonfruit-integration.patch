@@ -1,0 +1,796 @@
+diff --git a/src/components/cybiko/cybiko.c b/src/components/cybiko/cybiko.c
+index 725b6c3..50eb71e 100644
+--- a/src/components/cybiko/cybiko.c
++++ b/src/components/cybiko/cybiko.c
+@@ -375,6 +375,12 @@ static void bus_illegal(void *ctx, h8s_cpu_t *cpu, uint16_t op)
+     cybiko_t *m = ctx;
+     (void)cpu;
+     if (op == CY_HLE_OP && cy_hle(m)) return;
++    if (op == CY_APP_OP && m->host.app_call) {
++        cpu->er[0] = m->host.app_call(m->host.user, cpu->er[0], cpu->er[1]);
++        m->app_called = true;
++        h8s_end_slice(cpu);
++        return;
++    }
+     m->illegal_ops++;
+ }
+ 
+@@ -493,6 +499,10 @@ int32_t cybiko_run(cybiko_t *m, int32_t states)
+         }
+         done += h8s_run(&m->cpu, slice);
+         cy_sync(m);
++        if (m->app_called) {
++            m->app_called = false;
++            break;
++        }
+         /* Hot code in CyOS modules is found where the CPU is found. */
+         if (m->cpu.cycles >= m->hle_sample_at) {
+             m->hle_sample_at = m->cpu.cycles + CY_CLOCK_HZ / 20;
+@@ -553,6 +563,14 @@ bool cybiko_serial_rx(cybiko_t *m, int port, uint8_t byte)
+     return true;
+ }
+ 
++void cybiko_lcd_show(cybiko_t *m, const uint8_t *picture)
++{
++    /* RAM row 0 is the bottom line of the screen. */
++    for (int y = 0; y < CY_LCD_H; y++)
++        memcpy(m->lcd.ram + (CY_LCD_H - 1 - y) * (CY_LCD_W / 4), picture + y * (CY_LCD_W / 4), CY_LCD_W / 4);
++    m->lcd.version++;
++}
++
+ uint32_t cybiko_lcd_render(const cybiko_t *m, uint8_t *lum)
+ {
+     const cy_lcd_t *l = &m->lcd;
+diff --git a/src/components/cybiko/include/cybiko.h b/src/components/cybiko/include/cybiko.h
+index 2910d0f..43fa7ee 100644
+--- a/src/components/cybiko/include/cybiko.h
++++ b/src/components/cybiko/include/cybiko.h
+@@ -92,6 +92,11 @@ typedef struct {
+     /* The MP3 cartridge's SD card: 512-byte blocks (see cy_cart_t). */
+     bool (*card_read)(void *user, uint32_t block, uint8_t *buf);
+     bool (*card_write)(void *user, uint32_t block, const uint8_t *buf);
++    /* A Cybiko program built for this emulator ran CY_APP_OP (see
++     * cybiko_app_call). `fn` and `arg` are ER0 and ER1; the result goes
++     * back in ER0. cybiko_run returns soon after, so the host can act on it
++     * (the browser launcher asks the host to open the browser). */
++    uint32_t (*app_call)(void *user, uint32_t fn, uint32_t arg);
+ } cy_host_t;
+ 
+ /* ---- peripheral state (internal, visible for tests and save states) ---- */
+@@ -280,6 +285,7 @@ typedef struct cybiko {
+     uint32_t unmapped_reads, unmapped_writes, illegal_ops;
+     uint32_t dtc_dma_use;      /* DMA transfers started by the DREQ pins (not wired) */
+     uint32_t wdt_resets;
++    bool app_called;           /* cybiko_run stops early after an app call */
+ } cybiko_t;
+ 
+ /* Set up a machine on caller-owned memory: rom is CY_ROM_BUF bytes with the
+@@ -316,6 +322,26 @@ uint32_t cybiko_unit_id(const cybiko_t *m);
+ /* Undo the ID change in a copy of the flash about to be saved. */
+ void cybiko_flash_original(const cybiko_t *m, uint8_t *copy);
+ 
++/* Programs made for this emulator (the Browser launcher from the
++ * cybiko-browser project) call the host with an
++ * opcode the H8S leaves undefined: the word CY_APP_OP, with the function in
++ * ER0 and its argument in ER1; the host's app_call result comes back in ER0.
++ * Real hardware would take it as a NOP, and the programs are only offered
++ * by the emulator. */
++#define CY_APP_OP 0x0042
++enum {
++    CY_APP_VERSION = 0,        /* returns CY_APP_API */
++    CY_APP_BROWSER = 1,        /* open the web browser; returns when it closes */
++};
++#define CY_APP_API 1
++
++/* Show a picture of the host's own on the LCD while CyOS is not running (the
++ * browser): CY_LCD_H rows of CY_LCD_W / 4 bytes from the top, four pixels a
++ * byte with the leftmost in the top bits, 0 the lightest pen to 3 the
++ * darkest. Save lcd.ram first and copy it back (and bump lcd.version)
++ * to give the screen back to CyOS. */
++void cybiko_lcd_show(cybiko_t *m, const uint8_t *picture);
++
+ /* Render the LCD as 8-bit luminance (0 black, 255 white), CY_LCD_W x
+  * CY_LCD_H, row 0 at the top. Returns lcd.version so callers can skip
+  * unchanged frames. */
+diff --git a/src/components/cybiko_app/CMakeLists.txt b/src/components/cybiko_app/CMakeLists.txt
+index 5f3e6ec..6784711 100644
+--- a/src/components/cybiko_app/CMakeLists.txt
++++ b/src/components/cybiko_app/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ idf_component_register(
+-    SRCS "cybiko_files.c" "cybiko_app.c" "cybiko_ui.c" "cybiko_link.c" "cybiko_cart.c"
++    SRCS "cybiko_files.c" "cybiko_app.c" "cybiko_ui.c" "cybiko_link.c" "cybiko_cart.c" "cybiko_browser.c"
+     INCLUDE_DIRS "include"
+-    REQUIRES m5_sd display cybiko
++    REQUIRES m5_sd display cybiko cy_browser
+     PRIV_REQUIRES input board config audio cy_mp3 cy_vfat heap esp_timer esp_wifi esp_netif esp_event nvs_flash
+ )
+diff --git a/src/components/cybiko_app/cybiko_app.c b/src/components/cybiko_app/cybiko_app.c
+index 727be66..868bd66 100644
+--- a/src/components/cybiko_app/cybiko_app.c
++++ b/src/components/cybiko_app/cybiko_app.c
+@@ -29,6 +29,7 @@
+ #include "cybiko_ui.h"
+ #include "cybiko_link.h"
+ #include "cybiko_cart.h"
++#include "cybiko_browser.h"
+ #include "cybiko.h"
+ #include "display.h"
+ #include "m5_sd.h"
+@@ -110,6 +111,15 @@ static int64_t wall_time(void *user)
+ /* CPU task                                                            */
+ /* ------------------------------------------------------------------ */
+ 
++static bool next_key(int *key, bool *down)
++{
++    key_event_t ev;
++    if (xQueueReceive(key_queue, &ev, 0) != pdTRUE) return false;
++    *key = ev.key;
++    *down = ev.down;
++    return true;
++}
++
+ static void cpu_task(void *arg)
+ {
+     (void)arg;
+@@ -131,6 +141,13 @@ static void cpu_task(void *arg)
+ 
+         int64_t run_start = esp_timer_get_time();
+         cybiko_run(machine, CHUNK_STATES);
++        if (cybiko_browser_requested()) {
++            /* CyOS waits in the launcher while the browser runs */
++            cybiko_browser_run(machine, flash, next_key);
++            t0 = esp_timer_get_time();
++            c0 = machine->cpu.cycles;
++            last_yield = t0;
++        }
+ 
+         int64_t now = esp_timer_get_time();
+         /* Every 5 s: how fast the emulation runs against real time, and how
+@@ -469,6 +486,9 @@ static bool load_disk(const char *cfg)
+         ESP_LOGI(TAG, "RAM disk restored (%u KB file)", (unsigned)(have >> 10));
+ 
+     int copied = install_apps();
++    uint32_t free_before = cy_disk_free(disk, disk_size);
++    cybiko_browser_install(disk, disk_size);
++    if (cy_disk_free(disk, disk_size) != free_before) copied++;
+     /* Rewrite the whole file when it is new, has grown or got apps; later
+      * saves only patch changed chunks into it. */
+     if (copied || have != disk_size) {
+@@ -528,7 +548,7 @@ void cybiko_app_start(void)
+     if (audio_init((uint8_t)volume) != ESP_OK) ESP_LOGW(TAG, "no sound");
+ 
+     cy_host_t host = { .serial_tx = on_serial_tx, .wall_time = wall_time, .speaker = on_speaker,
+-                       .rf_send = cybiko_link_send };
++                       .rf_send = cybiko_link_send, .app_call = cybiko_browser_app_call };
+     cybiko_init(machine, &host, rom, flash, ram);
+     cybiko_set_disk(machine, disk, disk_size);
+     memcpy(ram, disk, CY_RAMDISK_SIZE);         /* in case the disk cannot be moved */
+diff --git a/src/components/cybiko_app/cybiko_browser.c b/src/components/cybiko_app/cybiko_browser.c
+new file mode 100644
+index 0000000..d7fbdf8
+--- /dev/null
++++ b/src/components/cybiko_app/cybiko_browser.c
+@@ -0,0 +1,134 @@
++/* The web browser in Cybiko mode (see cybiko_browser.h). */
++#include <string.h>
++#include <stdlib.h>
++#include <time.h>
++#include <sys/stat.h>
++#include "cybiko_browser.h"
++#include "cybiko_app.h"
++#include "cybiko_link.h"
++#include "cyb_net_esp.h"
++#include "m5_sd.h"
++#include "esp_log.h"
++#include "esp_heap_caps.h"
++#include "esp_timer.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include "freertos/semphr.h"
++
++static const char *TAG = "cy_browser";
++
++#define DATA_DIR CYBIKO_SD_DIR "/browser"   /* bookmarks and settings */
++#define APP_NAME "Browser.app"
++
++static cyb_t *browser;
++static volatile bool requested;
++
++void cybiko_browser_install(uint8_t *disk, uint32_t size)
++{
++    cy_disk_file_t f;
++    if (cy_disk_find(disk, size, APP_NAME, &f) && f.size == cyb_launcher_app_size) {
++        uint8_t *have = malloc(cyb_launcher_app_size);
++        bool same = have && cy_disk_read(disk, size, APP_NAME, have, (uint32_t)cyb_launcher_app_size) ==
++                                (int32_t)cyb_launcher_app_size &&
++                    !memcmp(have, cyb_launcher_app, cyb_launcher_app_size);
++        free(have);
++        if (same) return;
++    }
++    uint32_t date = (uint32_t)((int64_t)time(NULL) + 2208988800LL);   /* 1970 -> 1900 */
++    if (cy_disk_write(disk, size, APP_NAME, cyb_launcher_app, (uint32_t)cyb_launcher_app_size, date) == 0)
++        ESP_LOGI(TAG, "put %s on the RAM disk", APP_NAME);
++    else
++        ESP_LOGW(TAG, "no room for %s on the RAM disk", APP_NAME);
++}
++
++uint32_t cybiko_browser_app_call(void *user, uint32_t fn, uint32_t arg)
++{
++    (void)user;
++    (void)arg;
++    switch (fn) {
++    case CY_APP_VERSION: return CY_APP_API;
++    case CY_APP_BROWSER: requested = true; return 1;
++    default: return 0;
++    }
++}
++
++bool cybiko_browser_requested(void)
++{
++    bool r = requested;
++    requested = false;
++    return r;
++}
++
++static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
++
++/* The browser runs in a task of its own: pages are parsed with a deeper stack
++ * than the CPU task has. Its stack may be in PSRAM (it never writes flash;
++ * the Wi-Fi networks are saved on the CPU task when it closes). */
++#define BROWSER_STACK 16384
++
++typedef struct {
++    cybiko_t *m;
++    bool (*next_key)(int *key, bool *down);
++    SemaphoreHandle_t done;
++} run_t;
++
++static void browser_task(void *arg)
++{
++    run_t *r = arg;
++    cybiko_t *m = r->m;
++    uint8_t *fb = malloc(CYB_FB_SIZE);
++    cyb_show(browser);
++    for (;;) {
++        int key;
++        bool down;
++        while (r->next_key(&key, &down)) {
++            int k = cybiko_browser_key(key);
++            if (k) cyb_key(browser, k, down);
++            /* releases reach CyOS's keyboard too, so none stays held down */
++            if (!down) cybiko_key(m, key, false);
++        }
++        if (!cyb_step(browser, now_ms())) break;
++        if (fb && cyb_render(browser, fb)) cybiko_lcd_show(m, fb);
++        vTaskDelay(pdMS_TO_TICKS(cyb_busy(browser) ? 5 : 20));
++    }
++    free(fb);
++    xSemaphoreGive(r->done);
++    vTaskSuspend(NULL);           /* deleted by the CPU task */
++}
++
++void cybiko_browser_run(cybiko_t *m, const uint8_t *flash, bool (*next_key)(int *key, bool *down))
++{
++    if (!browser) {
++        static cyb_net_t net;
++        cyb_net_esp(&net);
++        mkdir(DATA_DIR, 0777);
++        browser = cyb_create(&net, flash, CY_FLASH_SIZE, DATA_DIR);
++        if (!browser) { ESP_LOGE(TAG, "out of memory"); return; }
++    }
++    ESP_LOGI(TAG, "open; free PSRAM %u, internal %u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
++             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
++    run_t r = { m, next_key, xSemaphoreCreateBinary() };
++    uint8_t *saved = malloc(sizeof m->lcd.ram);
++    TaskHandle_t task = NULL;
++    bool caps = false;
++    if (!r.done || !saved) goto out;
++    memcpy(saved, m->lcd.ram, sizeof m->lcd.ram);
++    if (xTaskCreatePinnedToCore(browser_task, "browser", BROWSER_STACK, &r, 4, &task, 1) != pdPASS) {
++        task = NULL;
++        caps = xTaskCreatePinnedToCoreWithCaps(browser_task, "browser", BROWSER_STACK, &r, 4, &task, 1,
++                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
++        if (!caps) task = NULL;
++    }
++    if (!task) { ESP_LOGE(TAG, "no memory for the browser task"); goto out; }
++    xSemaphoreTake(r.done, portMAX_DELAY);
++    if (caps) vTaskDeleteWithCaps(task);
++    else vTaskDelete(task);
++    memcpy(m->lcd.ram, saved, sizeof m->lcd.ram);
++    m->lcd.version++;
++out:
++    free(saved);
++    if (r.done) vSemaphoreDelete(r.done);
++    cyb_net_esp_stop();
++    cybiko_link_resume();
++    ESP_LOGI(TAG, "closed");
++}
+diff --git a/src/components/cybiko_app/cybiko_link.c b/src/components/cybiko_app/cybiko_link.c
+index 26ed3e4..57fb2f9 100644
+--- a/src/components/cybiko_app/cybiko_link.c
++++ b/src/components/cybiko_app/cybiko_link.c
+@@ -25,6 +25,7 @@ typedef struct {
+ } packet_t;
+ 
+ static bool enabled;
++static int radio_channel = 1;
+ static QueueHandle_t rx_queue;
+ static uint32_t dropped;
+ static const uint8_t broadcast[ESP_NOW_ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+@@ -45,6 +46,10 @@ static bool start_radio(int channel)
+     esp_err_t err = esp_netif_init();
+     if (err == ESP_OK) err = esp_event_loop_create_default();
+     if (err == ESP_ERR_INVALID_STATE) err = ESP_OK;
++    /* The station interface is for the web browser (cybiko_browser.c), which
++     * joins a Wi-Fi network over the same radio. */
++    if (err == ESP_OK && !esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") && !esp_netif_create_default_wifi_sta())
++        err = ESP_ERR_NO_MEM;
+     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+     if (err == ESP_OK) err = esp_wifi_init(&cfg);
+     if (err == ESP_OK) err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+@@ -96,12 +101,20 @@ void cybiko_link_init(cybiko_t *m, const char *cfg)
+         ESP_LOGW(TAG, "bad rf.channel in cybiko.cfg; using 1");
+         channel = 1;
+     }
++    radio_channel = channel;
+     rx_queue = xQueueCreate(8, sizeof(packet_t));
+     if (!rx_queue || !start_radio(channel)) return;
+     enabled = true;
+     ESP_LOGI(TAG, "radio over ESP-NOW, Wi-Fi channel %d", channel);
+ }
+ 
++void cybiko_link_resume(void)
++{
++    if (!enabled) return;
++    esp_err_t err = esp_wifi_set_channel((uint8_t)radio_channel, WIFI_SECOND_CHAN_NONE);
++    if (err != ESP_OK) ESP_LOGW(TAG, "radio channel %d not restored: %s", radio_channel, esp_err_to_name(err));
++}
++
+ void cybiko_link_send(void *user, const uint8_t *pkt, size_t len, uint8_t channel)
+ {
+     (void)user;
+diff --git a/src/components/cybiko_app/cybiko_link.h b/src/components/cybiko_app/cybiko_link.h
+index 8c8dd45..a214453 100644
+--- a/src/components/cybiko_app/cybiko_link.h
++++ b/src/components/cybiko_app/cybiko_link.h
+@@ -22,3 +22,5 @@ void cybiko_link_init(cybiko_t *m, const char *cfg);
+ void cybiko_link_send(void *user, const uint8_t *pkt, size_t len, uint8_t channel);
+ /* CPU task: hand packets heard from other boards to the machine. */
+ void cybiko_link_poll(cybiko_t *m);
++/* Back on the radio's own channel after the web browser used Wi-Fi. */
++void cybiko_link_resume(void);
+diff --git a/src/components/cybiko_app/include/cybiko_browser.h b/src/components/cybiko_app/include/cybiko_browser.h
+new file mode 100644
+index 0000000..c484187
+--- /dev/null
++++ b/src/components/cybiko_app/include/cybiko_browser.h
+@@ -0,0 +1,49 @@
++#pragma once
++/* The web browser in Cybiko mode. The cybiko-browser project
++ * (src/components/cy_browser, a git submodule) has the browser itself and
++ * the Browser launcher for the Cybiko desktop; this is the glue: it puts
++ * the launcher on the RAM disk and, when the launcher asks for it
++ * (CY_APP_BROWSER), pauses CyOS and runs the browser on the Cybiko screen
++ * until the user closes it. */
++#include <stdbool.h>
++#include <stdint.h>
++#include "cybiko.h"
++#include "cy_browser.h"
++
++/* Puts Browser.app on the RAM disk unless it is there already, as built. */
++void cybiko_browser_install(uint8_t *disk, uint32_t size);
++
++/* The host's app_call hook (cy_host_t). */
++uint32_t cybiko_browser_app_call(void *user, uint32_t fn, uint32_t arg);
++/* True once the launcher asked for the browser (and clears it). */
++bool cybiko_browser_requested(void);
++
++/* Runs the browser until the user closes it, on the CPU task (CyOS does not
++ * run meanwhile). next_key gives the keys pressed since the last call
++ * (false when there are none); flash is the CyOS flash, for its fonts. */
++void cybiko_browser_run(cybiko_t *m, const uint8_t *flash,
++                        bool (*next_key)(int *key, bool *down));
++
++/* A Cybiko key (CYK_*) as the browser's (CYB_K_* or a character), 0 if it
++ * has none. */
++static inline int cybiko_browser_key(int cyk)
++{
++    static const struct { int16_t cyk, key; } map[] = {
++        { CYK_UP, CYB_K_UP }, { CYK_DOWN, CYB_K_DOWN }, { CYK_LEFT, CYB_K_LEFT }, { CYK_RIGHT, CYB_K_RIGHT },
++        { CYK_ENTER, CYB_K_ENTER }, { CYK_ESC, CYB_K_ESC }, { CYK_TAB, CYB_K_TAB }, { CYK_DEL, CYB_K_DEL },
++        { CYK_SELECT, CYB_K_SELECT }, { CYK_MENU, CYB_K_MENU }, { CYK_HELP, CYB_K_HELP },
++        { CYK_SHIFT, CYB_K_SHIFT }, { CYK_FN, CYB_K_FN },
++        { CYK_F1, CYB_K_F1 }, { CYK_F2, CYB_K_F2 }, { CYK_F3, CYB_K_F3 }, { CYK_F4, CYB_K_F4 },
++        { CYK_F5, CYB_K_F5 }, { CYK_F6, CYB_K_F6 }, { CYK_F7, CYB_K_F7 },
++        { CYK_SPACE, ' ' }, { CYK_DOT, '.' }, { CYK_COMMA, ',' }, { CYK_SEMI, ';' }, { CYK_EXCL, '!' },
++        { CYK_LPAREN, '(' }, { CYK_RPAREN, ')' },
++        { CYK_A, 'a' }, { CYK_B, 'b' }, { CYK_C, 'c' }, { CYK_D, 'd' }, { CYK_E, 'e' }, { CYK_F, 'f' },
++        { CYK_G, 'g' }, { CYK_H, 'h' }, { CYK_I, 'i' }, { CYK_J, 'j' }, { CYK_K, 'k' }, { CYK_L, 'l' },
++        { CYK_M, 'm' }, { CYK_N, 'n' }, { CYK_O, 'o' }, { CYK_P, 'p' }, { CYK_Q, 'q' }, { CYK_R, 'r' },
++        { CYK_S, 's' }, { CYK_T, 't' }, { CYK_U, 'u' }, { CYK_V, 'v' }, { CYK_W, 'w' }, { CYK_X, 'x' },
++        { CYK_Y, 'y' }, { CYK_Z, 'z' },
++    };
++    for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
++        if (map[i].cyk == cyk) return map[i].key;
++    return 0;
++}
+diff --git a/src/host/CMakeLists.txt b/src/host/CMakeLists.txt
+index d043193..794b96f 100644
+--- a/src/host/CMakeLists.txt
++++ b/src/host/CMakeLists.txt
+@@ -245,6 +245,20 @@ if(HOST_UI)
+         target_compile_options(cybiko PRIVATE -O2 -Wall -Wextra)
+     endif()
+ endif()
++# The web browser for Cybiko mode, when its submodule is checked out
++# (src/components/cy_browser, the cybiko-browser project)
++if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../components/cy_browser/CMakeLists.txt AND NOT WIN32)
++    add_subdirectory(../components/cy_browser cy_browser)
++    target_compile_definitions(cybiko_host PRIVATE CY_WITH_BROWSER)
++    target_include_directories(cybiko_host PRIVATE ../components/cybiko_app/include)
++    target_link_libraries(cybiko_host PRIVATE cy_browser_curl)
++    if(HOST_UI)
++        target_compile_definitions(cybiko PRIVATE CY_WITH_BROWSER)
++        target_include_directories(cybiko PRIVATE ../components/cybiko_app/include)
++        target_link_libraries(cybiko PRIVATE cy_browser_curl)
++    endif()
++endif()
++
+ if(NOT MSVC)
+     target_compile_options(test_cybiko PRIVATE -O2 -Wall -Wextra)
+     target_compile_options(cybiko_host PRIVATE -O2 -Wall -Wextra)
+diff --git a/src/host/cybiko_host.c b/src/host/cybiko_host.c
+index 8f1390b..881f295 100644
+--- a/src/host/cybiko_host.c
++++ b/src/host/cybiko_host.c
+@@ -20,6 +20,12 @@
+  *   --blit-fuzz N      (built with -DCY_HLE_CHECK) at the end, check N random
+  *                      calls of the native ROM blit against the original
+  *                      (checked every 100 ms of emulated time)
++ *   --browse KEYS      (built with the browser, src/components/cy_browser) when
++ *                      the Browser launcher opens the browser, press KEYS there
++ *                      (a comma list of --press key names, or "type:TEXT") and
++ *                      close it; its screens go to --frames too. Pages come
++ *                      through the curl program
++ *   --browse-url URL   the page the browser opens first (default its home)
+  *   --press KEY@MS[:D] hold KEY for D ms (default 200) from MS milliseconds; KEY is
+  *                      a letter, f1-f7, enter, esc, space, up/down/left/right,
+  *                      select, del, tab, ins, menu, shift, fn, help, dot, comma,
+@@ -43,6 +49,10 @@
+ #endif
+ #include "cy_mp3.h"
+ #include "cy_vfat.h"
++#ifdef CY_WITH_BROWSER
++#include "cybiko_browser.h"
++#include "cyb_net_curl.h"
++#endif
+ 
+ static const struct { const char *name; int key; } key_names[] = {
+     { "a", CYK_A }, { "b", CYK_B }, { "c", CYK_C }, { "d", CYK_D }, { "e", CYK_E },
+@@ -200,6 +210,16 @@ static void on_rf(void *user, const uint8_t *pkt, size_t len, uint8_t channel)
+ 
+ static int64_t wall(void *user) { (void)user; return (int64_t)time(NULL); }
+ 
++static bool browse_requested;
++
++static uint32_t on_app_call(void *user, uint32_t fn, uint32_t arg)
++{
++    (void)user;
++    fprintf(stderr, "[%.3f] app call %u (%u)\n", (double)the_machine->cpu.cycles / CY_CLOCK_HZ, (unsigned)fn, (unsigned)arg);
++    if (fn == CY_APP_BROWSER) browse_requested = true;
++    return fn == CY_APP_VERSION ? CY_APP_API : fn == CY_APP_BROWSER;
++}
++
+ static uint8_t *load(const char *path, size_t want, size_t *got, bool exact)
+ {
+     FILE *f = fopen(path, "rb");
+@@ -234,6 +254,58 @@ static int key_by_name(const char *s)
+     return -1;
+ }
+ 
++#ifdef CY_WITH_BROWSER
++/* The browser, opened by the launcher: KEYS are pressed in it one after
++ * another, each once the browser has nothing left to load, and it is
++ * closed at the end if they did not close it. */
++static void run_browser(cybiko_t *m, const uint8_t *flash, const char *keys, const char *url,
++                        const char *frames, int *frame_no)
++{
++    static cyb_t *b;
++    static cyb_net_t net;
++    static uint32_t clock_ms;
++    static bool url_done;
++    uint8_t fb[CYB_FB_SIZE], saved[sizeof m->lcd.ram], lum[CY_LCD_W * CY_LCD_H];
++    if (!b) {
++        cyb_net_curl(&net, NULL);
++        b = cyb_create(&net, flash, CY_FLASH_SIZE, NULL);
++    }
++    memcpy(saved, m->lcd.ram, sizeof saved);
++    cyb_show(b);
++    if (url && !url_done) { cyb_go(b, url); url_done = true; }
++    char *list = strdup(keys ? keys : ""), *save = NULL;
++    char *k = strtok_r(list, ",", &save);
++    bool open = true;
++    while (open) {
++        for (int i = 0; open && (i < 3 || cyb_busy(b)) && i < 5000; i++) open = cyb_step(b, clock_ms += 20);
++        if (cyb_render(b, fb)) {
++            cybiko_lcd_show(m, fb);
++            if (frames) {
++                char path[512];
++                cybiko_lcd_render(m, lum);
++                snprintf(path, sizeof path, "%s/frame_%04d.pgm", frames, (*frame_no)++);
++                write_pgm(path, lum);
++            }
++        }
++        if (!open) break;
++        if (!k) { fprintf(stderr, "browser: closed after the last key\n"); break; }
++        if (!strncmp(k, "type:", 5)) {
++            for (const char *c = k + 5; *c; c++) cyb_char(b, (unsigned char)*c);
++        } else {
++            int key = cybiko_browser_key(key_by_name(k));
++            if (!key) fprintf(stderr, "browser: no key %s\n", k);
++            cyb_key(b, key, true);
++            if (key != CYB_K_SHIFT && key != CYB_K_FN) cyb_key(b, key, false);
++        }
++        k = strtok_r(NULL, ",", &save);
++    }
++    free(list);
++    memcpy(m->lcd.ram, saved, sizeof saved);
++    m->lcd.version++;
++    fprintf(stderr, "[%.3f] browser closed\n", (double)m->cpu.cycles / CY_CLOCK_HZ);
++}
++#endif
++
+ int main(int argc, char **argv)
+ {
+     const char *rom_path = NULL, *flash_path = NULL, *ramdisk_path = NULL;
+@@ -248,7 +320,7 @@ int main(int argc, char **argv)
+     double seconds = 20;
+     unsigned disk_kb = 0;
+     bool ls = false, cart = false, cart_log = false;
+-    const char *card_path = NULL, *wav_path = NULL;
++    const char *card_path = NULL, *wav_path = NULL, *browse_keys = NULL, *browse_url = NULL;
+     for (int i = 1; i < argc; i++) {
+         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+         if (!strcmp(a, "--rom") && v) { rom_path = v; i++; }
+@@ -268,6 +340,8 @@ int main(int argc, char **argv)
+         else if (!strcmp(a, "--card") && v) { card_path = v; cart = true; i++; }
+         else if (!strcmp(a, "--cart-log")) cart = cart_log = true;
+         else if (!strcmp(a, "--wav") && v) { wav_path = v; i++; }
++        else if (!strcmp(a, "--browse") && v) { browse_keys = v; i++; }
++        else if (!strcmp(a, "--browse-url") && v) { browse_url = v; i++; }
+         else if (!strcmp(a, "--dump-ram") && v) { dump = v; i++; }
+         else if (!strcmp(a, "--hex-port") && v) { hex_port = atoi(v); i++; }
+         else if (!strcmp(a, "--pair") && v) { pair_path = v; i++; }
+@@ -339,7 +413,8 @@ int main(int argc, char **argv)
+ 
+     static cybiko_t m, m2;
+     cy_host_t host = { .user = (void *)0, .serial_tx = on_tx, .wall_time = wall, .rf_send = on_rf,
+-                       .card_read = card_read, .card_write = card_write };
++                       .card_read = card_read, .card_write = card_write,
++                       .app_call = on_app_call };
+     cybiko_init(&m, &host, rom, flash, ram);
+     if (disk_kb) cybiko_set_disk(&m, disk, disk_size);
+     if (unit_id) cybiko_set_unit_id(&m, unit_id);
+@@ -448,6 +523,16 @@ int main(int argc, char **argv)
+             cybiko_run(&m, step);
+         }
+         if (mp3) mp3_pump(&m, mp3, wav);
++        if (browse_requested) {
++            browse_requested = false;
++#ifdef CY_WITH_BROWSER
++            run_browser(&m, flash, browse_keys, browse_url, frames, &frame_no);
++#else
++            (void)browse_keys;
++            (void)browse_url;
++            fprintf(stderr, "built without the browser (src/components/cy_browser)\n");
++#endif
++        }
+         if (frames && m.cpu.cycles / chunk != (m.cpu.cycles - step) / chunk) {
+             uint32_t v = cybiko_lcd_render(&m, lum);
+             if (v != last_version) {
+diff --git a/src/host/cybiko_sdl.c b/src/host/cybiko_sdl.c
+index 3436b3a..3f87720 100644
+--- a/src/host/cybiko_sdl.c
++++ b/src/host/cybiko_sdl.c
+@@ -15,7 +15,12 @@
+  *   mp3card.img   the card as a disk image instead, used while card/ is empty
+  *   cybiko.cfg    disk.size = 1-6 (MB), sound.volume = 0-100, cart = auto|mp3|off
+  *
+- * A flash that CyOS reprograms (an OS update) is saved as flash.bin. */
++ * A flash that CyOS reprograms (an OS update) is saved as flash.bin.
++ *
++ * Built with the web browser (src/components/cy_browser, the cybiko-browser
++ * submodule), the Browser launcher is put on the RAM disk and opens it;
++ * pages come through the curl program, and bookmarks and settings are kept
++ * in DIR/browser. */
+ #include <SDL3/SDL.h>
+ #include <SDL3/SDL_main.h>
+ #include <dirent.h>
+@@ -28,6 +33,10 @@
+ #include "cybiko.h"
+ #include "cy_mp3.h"
+ #include "cy_vfat.h"
++#ifdef CY_WITH_BROWSER
++#include "cybiko_browser.h"
++#include "cyb_net_curl.h"
++#endif
+ 
+ #define RATE 32000
+ #define CHUNK (CY_CLOCK_HZ / 1000)          /* run 1 ms at a go */
+@@ -139,6 +148,63 @@ static void install_apps(void)
+     closedir(d);
+ }
+ 
++/* ---- the web browser ---- */
++
++#ifdef CY_WITH_BROWSER
++static cyb_t *browser;
++static bool browse_requested, browsing;
++static uint8_t lcd_saved[sizeof m.lcd.ram];
++
++static uint32_t on_app_call(void *user, uint32_t fn, uint32_t arg)
++{
++    (void)user;
++    (void)arg;
++    if (fn == CY_APP_VERSION) return CY_APP_API;
++    if (fn == CY_APP_BROWSER) { browse_requested = true; return 1; }
++    return 0;
++}
++
++static void install_browser(void)
++{
++    cy_disk_file_t f;
++    if (cy_disk_find(disk, disk_size, "Browser.app", &f) && f.size == cyb_launcher_app_size) return;
++    uint32_t date = (uint32_t)(time(NULL) + 2208988800LL);
++    if (cy_disk_write(disk, disk_size, "Browser.app", cyb_launcher_app, (uint32_t)cyb_launcher_app_size, date) == 0)
++        printf("apps: Browser.app put on the RAM disk\n");
++}
++
++static void browser_open(const uint8_t *flash)
++{
++    if (!browser) {
++        static cyb_net_t net;
++        char p[1200];
++        cyb_net_curl(&net, NULL);
++        path_in(p, sizeof p, "browser");
++        mkdir(p, 0777);
++        browser = cyb_create(&net, flash, CY_FLASH_SIZE, p);
++    }
++    if (!browser) return;
++    memcpy(lcd_saved, m.lcd.ram, sizeof lcd_saved);
++    cyb_show(browser);
++    browsing = true;
++}
++
++/* Runs the browser a bit; false once it has closed (CyOS gets the screen
++ * back). */
++static bool browser_step(void)
++{
++    static uint8_t fb[CYB_FB_SIZE];
++    if (!cyb_step(browser, (uint32_t)SDL_GetTicks())) {
++        memcpy(m.lcd.ram, lcd_saved, sizeof lcd_saved);
++        m.lcd.version++;
++        browsing = false;
++        return false;
++    }
++    if (cyb_render(browser, fb)) cybiko_lcd_show(&m, fb);
++    return true;
++}
++#endif
++
+ /* ---- the cartridge's card ---- */
+ 
+ static FILE *card_file;
+@@ -319,6 +385,24 @@ static void save_flash(uint8_t *flash)
+     free(copy);
+ }
+ 
++static void show_lcd(SDL_Texture *tex, const uint8_t *lum)
++{
++    void *pixels;
++    int pitch;
++    if (!SDL_LockTexture(tex, NULL, &pixels, &pitch)) return;
++    for (int y = 0; y < CY_LCD_H; y++) {
++        uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
++        for (int x = 0; x < CY_LCD_W; x++) {
++            /* a grey-green LCD: lum 0 black, 255 the panel colour */
++            uint32_t l = lum[y * CY_LCD_W + x];
++            uint32_t r = 0x18 + l * (0xc6 - 0x18) / 255, g = 0x1c + l * (0xd0 - 0x1c) / 255,
++                     b = 0x18 + l * (0xbc - 0x18) / 255;
++            row[x] = r << 16 | g << 8 | b;
++        }
++    }
++    SDL_UnlockTexture(tex);
++}
++
+ int main(int argc, char **argv)
+ {
+     int zoom = 4;
+@@ -367,9 +451,15 @@ int main(int argc, char **argv)
+     FILE *df = fopen(p, "rb");
+     if (df) { size_t n = fread(disk, 1, disk_size, df); fclose(df); printf("RAM disk: %zu KB loaded\n", n >> 10); }
+     install_apps();
++#ifdef CY_WITH_BROWSER
++    install_browser();
++#endif
+ 
+     cy_host_t host = { .serial_tx = on_tx, .wall_time = wall_time, .speaker = on_speaker,
+                        .card_read = card_read, .card_write = card_write };
++#ifdef CY_WITH_BROWSER
++    host.app_call = on_app_call;
++#endif
+     uint8_t *ram = calloc(1, CY_RAM_SIZE);
+     cybiko_init(&m, &host, rom, flash, ram);
+     cybiko_set_disk(&m, disk, disk_size);
+@@ -415,9 +505,36 @@ int main(int argc, char **argv)
+             if (e.type == SDL_EVENT_QUIT) running = false;
+             else if ((e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) || e.type == SDL_EVENT_KEY_UP) {
+                 int k = map_key(e.key.key);
++#ifdef CY_WITH_BROWSER
++                if (browsing) {
++                    int bk = k >= 0 ? cybiko_browser_key(k) : 0;
++                    if (bk) cyb_key(browser, bk, e.type == SDL_EVENT_KEY_DOWN);
++                    /* releases reach CyOS too, so no key stays held down */
++                    if (k >= 0 && e.type == SDL_EVENT_KEY_UP) cybiko_key(&m, k, false);
++                    continue;
++                }
++#endif
+                 if (k >= 0) cybiko_key(&m, k, e.type == SDL_EVENT_KEY_DOWN);
+             }
+         }
++#ifdef CY_WITH_BROWSER
++        /* CyOS waits in the launcher while the browser is open */
++        if (browsing && browser_step()) {
++            uint32_t ver = cybiko_lcd_render(&m, lum);
++            if (ver != shown) {
++                shown = ver;
++                show_lcd(tex, lum);
++            }
++            SDL_SetRenderDrawColor(ren, 0x30, 0x30, 0x30, 255);
++            SDL_RenderClear(ren);
++            SDL_RenderTexture(ren, tex, NULL, NULL);
++            SDL_RenderPresent(ren);
++            SDL_Delay(cyb_busy(browser) ? 1 : 10);
++            start = SDL_GetTicksNS();
++            base_cycles = m.cpu.cycles;
++            continue;
++        }
++#endif
+         /* With sound, the sound card sets the pace: run until SOUND_AHEAD
+          * samples are queued, so it never runs dry (a wall-clock pace left
+          * it only a few ms ahead, and sound broke up on PulseAudio and
+@@ -444,25 +561,18 @@ int main(int argc, char **argv)
+         while (m.cpu.cycles < want) {
+             cybiko_run(&m, CHUNK);
+             make_sound(audio);
++#ifdef CY_WITH_BROWSER
++            if (browse_requested) {
++                browse_requested = false;
++                browser_open(flash);
++                break;
++            }
++#endif
+         }
+         uint32_t ver = cybiko_lcd_render(&m, lum);
+         if (ver != shown) {
+             shown = ver;
+-            void *pixels;
+-            int pitch;
+-            if (SDL_LockTexture(tex, NULL, &pixels, &pitch)) {
+-                for (int y = 0; y < CY_LCD_H; y++) {
+-                    uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
+-                    for (int x = 0; x < CY_LCD_W; x++) {
+-                        /* a grey-green LCD: lum 0 black, 255 the panel colour */
+-                        uint32_t l = lum[y * CY_LCD_W + x];
+-                        uint32_t r = 0x18 + l * (0xc6 - 0x18) / 255, g = 0x1c + l * (0xd0 - 0x1c) / 255,
+-                                 b = 0x18 + l * (0xbc - 0x18) / 255;
+-                        row[x] = r << 16 | g << 8 | b;
+-                    }
+-                }
+-                SDL_UnlockTexture(tex);
+-            }
++            show_lcd(tex, lum);
+         }
+         SDL_SetRenderDrawColor(ren, 0x30, 0x30, 0x30, 255);
+         SDL_RenderClear(ren);
