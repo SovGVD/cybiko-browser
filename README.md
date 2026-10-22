@@ -94,7 +94,13 @@ build/cyb_shot --flash cyos.bin --keys "down,down,enter" page.png http://frogfin
 flash image; without it, a built-in block font.
 
 The launcher app needs `gcc-h8300-hms` and `binutils-h8300-hms` (Ubuntu
-packages): `cd launcher && ./build.sh` rebuilds `src/cy_browser_app.h`.
+packages): `cd launcher && APP_OUT=. ./build.sh` rebuilds `src/cy_browser_app.h` and
+`launcher/Browser.app`.
+
+The patched firmware installs Browser.app on the Cybiko by itself. A ready
+`launcher/Browser.app` is also in the repository, to copy to
+`/Cybiko/apps/` by hand. It works only in the patched Dragonfruit: on a real
+Cybiko or an unpatched emulator it can't open anything.
 
 ## Status
 

@@ -2,7 +2,8 @@
 # Builds the Cybiko programs here into CyOS applications and the C arrays the
 # firmware and PC tools install from. Needs the GNU H8 tools
 # (Debian/Ubuntu: binutils-h8300-hms gcc-h8300-hms). The generated files are
-# committed, so a firmware build does not need them.
+# committed, so a firmware build does not need them. APP_OUT=DIR also
+# copies the .app files there (launcher/Browser.app is kept in the repo).
 set -e
 cd "$(dirname "$0")"
 tools=../tools
@@ -26,4 +27,5 @@ app() {    # app NAME SYMBOL DIR
 }
 
 app Browser cy_browser_app browser
+[ -n "$APP_OUT" ] && cp "$tmp"/*.app "$APP_OUT"/
 rm -rf "$tmp"
