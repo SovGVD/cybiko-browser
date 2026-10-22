@@ -220,12 +220,18 @@ static uint32_t item(out_t *o, const cyb_doc_t *d, uint32_t i, uint32_t off, con
     const cyb_item_t *it = &d->items[i];
     switch (it->kind) {
     case IT_TEXT: {
-        open_link(o, d, it->target, l);
-        set_style(o, it->style);
         const char *s = d->pool + it->text + off;
         size_t n = it->len - off;
+        /* the WAP browser drops spaces next to tags: those become &nbsp; */
+        bool lead = n && s[0] == ' ', trail = n > 1 && s[n - 1] == ' ' && !alone;
+        if (lead) { s++; n--; off++; }
+        if (trail) n--;
+        open_link(o, d, it->target, l);
+        set_style(o, it->style);
+        if (lead) puts_(o, "&nbsp;");
         size_t at = o->len;
         esc(o, s, n);
+        if (trail) puts_(o, "&nbsp;");
         if (!o->over || !alone) return it->len;
         /* a text bigger than a deck: as much as fits, cut at a space */
         o->over = false;
