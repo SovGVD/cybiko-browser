@@ -43,7 +43,7 @@ typedef struct { char ssid[33], password[65]; } saved_network_t;
 typedef struct { uint32_t version, count; saved_network_t nets[SAVED_MAX]; } saved_store_t;
 
 static saved_store_t saved;
-static bool saved_dirty;          /* written to NVS by cyb_net_esp_stop */
+static volatile bool saved_dirty; /* written to NVS by cyb_net_esp_save/stop */
 static SemaphoreHandle_t lock;
 
 static void load_saved(void)
@@ -506,6 +506,14 @@ void cyb_net_esp(cyb_net_t *net)
     net->wifi_join = wifi_join;
     net->wifi_saved = wifi_saved;
     net->wifi_forget = wifi_forget;
+}
+
+void cyb_net_esp_save(void)
+{
+    if (!saved_dirty || !lock) return;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (saved_dirty && store_saved()) saved_dirty = false;
+    xSemaphoreGive(lock);
 }
 
 void cyb_net_esp_stop(void)

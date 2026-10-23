@@ -12,3 +12,7 @@ void cyb_net_esp(cyb_net_t *net);
  * in internal RAM (it writes NVS); the browser itself may run on a PSRAM
  * stack. */
 void cyb_net_esp_stop(void);
+/* Saves the networks added or forgotten (on the Wi-Fi page) if there are
+ * any; cheap when there are none. The same rule: a task with its stack in
+ * internal RAM. */
+void cyb_net_esp_save(void);

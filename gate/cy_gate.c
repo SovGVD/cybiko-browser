@@ -60,9 +60,12 @@ static const char home_wml[] =
     "<a href=\"http://text.npr.org/\">NPR Text</a><br/>"
     "<a href=\"http://wiby.me/\">Wiby search</a><br/>"
     "<a href=\"http://wttr.in/?T0\">Weather</a><br/>"
+    "<a href=\"http://c/wifi\">Wi-Fi setup</a><br/>"
     "</p></card></wml>";
 
-enum { IDLE, FETCH, SEND };
+enum { IDLE, FETCH, SEND, WIFI };
+
+#define WIFI_SCAN_MS 8000           /* longest wait for a scan */
 
 struct cy_gate {
     uint32_t id;
@@ -102,6 +105,10 @@ struct cy_gate {
     cyb_doc_t doc;
     char doc_url[1024];
     bool have_doc;
+
+    /* the Wi-Fi page waits for a scan or for joining a network */
+    uint32_t wifi_until;
+    char wifi_note[96];
 
     char home[256];
     char *alias[ALIASES];
@@ -580,6 +587,148 @@ static void fetch_step(cy_gate_t *g)
     }
 }
 
+/* ---- the Wi-Fi page ---- */
+
+/* Text for WML: markup characters escaped, "$" doubled (WML variables). */
+static size_t wml_esc(char *out, size_t cap, const char *s)
+{
+    size_t n = 0;
+    for (; *s && n + 7 < cap; s++) {
+        const char *e = NULL;
+        switch (*s) {
+        case '<': e = "&lt;"; break;
+        case '>': e = "&gt;"; break;
+        case '&': e = "&amp;"; break;
+        case '"': e = "&quot;"; break;
+        case '$': e = "$$"; break;
+        }
+        if (e) { size_t k = strlen(e); memcpy(out + n, e, k); n += k; }
+        else if ((uint8_t)*s >= 0x20) out[n++] = *s;
+    }
+    out[n] = 0;
+    return n;
+}
+
+/* The page: what the gate is connected to, the saved networks (each can be
+ * forgotten) and the ones around (each opens a page asking for its
+ * password). Networks go into short URLs: "W" and the network's name. */
+static void wifi_page(cy_gate_t *g)
+{
+    char *w = malloc(CY_WML_MAX + 1);
+    if (!w) { finish(g); return; }
+    size_t n = 0;
+    char e[200];
+#define PUT(...) do { int k_ = snprintf(w + n, CY_WML_MAX + 1 - n, __VA_ARGS__); \
+        if (k_ > 0) n = n + (size_t)k_ <= CY_WML_MAX ? n + (size_t)k_ : CY_WML_MAX; } while (0)
+    PUT("<?xml version=\"1.0\"?>\n<wml><card id=\"w\" title=\"Wi-Fi\"><p>");
+    if (g->wifi_note[0]) { wml_esc(e, sizeof e, g->wifi_note); PUT("<b>%s</b><br/>", e); }
+    char st[96] = "";
+    int on = g->net.wifi_status(g->net.user, st, sizeof st);
+    wml_esc(e, sizeof e, st);
+    PUT("%s%s<br/>", on > 0 ? "Online: " : on == 0 ? "Connecting: " : "Offline. ", e);
+    if (g->net.wifi_saved) {
+        char names[5][33];
+        int k = g->net.wifi_saved(g->net.user, names, 5);
+        if (k > 0) PUT("<b>Saved</b><br/>");
+        for (int i = 0; i < k; i++) {
+            uint32_t a = alias_add(g, "W", names[i]);
+            wml_esc(e, sizeof e, names[i]);
+            PUT("%s <a href=\"" ALIAS_HOST "x%u\">[forget]</a><br/>", e, (unsigned)a);
+        }
+    }
+    if (g->net.wifi_scan) {
+        cyb_ap_t aps[12];
+        int k = g->net.wifi_scan(g->net.user, aps, 12);
+        PUT("<b>Networks here</b> <a href=\"" ALIAS_HOST "wifi?scan\">[look again]</a><br/>");
+        if (k < 0) PUT("Still looking...<br/>");
+        else if (!k) PUT("None found.<br/>");
+        for (int i = 0; i < k && n + 300 < CY_WML_MAX; i++) {
+            uint32_t a = alias_add(g, "W", aps[i].ssid);
+            wml_esc(e, sizeof e, aps[i].ssid);
+            PUT("<a href=\"" ALIAS_HOST "j%u\">%s</a> %d%s<br/>", (unsigned)a, e, aps[i].rssi, aps[i].open ? " open" : "");
+        }
+    }
+    PUT("<a href=\"" ALIAS_HOST "\">Home</a></p></card></wml>");
+#undef PUT
+    g->wifi_note[0] = 0;
+    answer(g, w, n);
+}
+
+/* Asks for the password of network a (a short URL's number). */
+static void wifi_ask(cy_gate_t *g, uint32_t a, const char *ssid)
+{
+    char *w = malloc(CY_WML_MAX + 1);
+    if (!w) { finish(g); return; }
+    char e[200];
+    wml_esc(e, sizeof e, ssid);
+    snprintf(w, CY_WML_MAX + 1,
+             "<?xml version=\"1.0\"?>\n<wml><card id=\"j\" title=\"Wi-Fi\"><p>"
+             "<b>%s</b><br/>Password (empty if open):<br/><input name=\"pw\" type=\"password\"/><br/>"
+             "<anchor>[Join]<go href=\"" ALIAS_HOST "j%u\"><postfield name=\"p\" value=\"$(pw)\"/></go></anchor><br/>"
+             "<a href=\"" ALIAS_HOST "wifi\">Back</a></p></card></wml>", e, (unsigned)a);
+    answer(g, w, strlen(w));
+}
+
+/* Waits (in cy_gate_poll) for the scan to finish, then shows the page. */
+static bool scanning(cy_gate_t *g)
+{
+    cyb_ap_t ap;
+    return g->net.wifi_scan(g->net.user, &ap, 1) < 0;
+}
+
+static void wifi_step(cy_gate_t *g)
+{
+    if (scanning(g) && (int32_t)(g->now - g->wifi_until) < 0) return;
+    g->state = IDLE;
+    wifi_page(g);
+}
+
+/* http://c/wifi[?scan], http://c/jN[?p=password] and http://c/xN */
+static bool wifi_request(cy_gate_t *g, const char *path)
+{
+    if (!g->net.wifi_status) {
+        if (!strncmp(path, "wifi", 4)) { answer_text(g, "Wi-Fi", "This gate is always online."); return true; }
+        return false;
+    }
+    if (!strcmp(path, "wifi") || !strcmp(path, "wifi?scan")) {
+        if (g->net.wifi_scan) {
+            if (path[4]) g->net.wifi_scan(g->net.user, NULL, 0);    /* a new scan */
+            if (scanning(g)) {
+                g->state = WIFI;
+                g->wifi_until = g->now + WIFI_SCAN_MS;
+                return true;
+            }
+        }
+        wifi_page(g);
+        return true;
+    }
+    if (path[0] != 'j' && path[0] != 'x') return false;
+    const char *ssid = alias_get(g, (uint32_t)strtoul(path + 1, NULL, 10));
+    if (!ssid || ssid[0] != 'W') { answer_text(g, "Expired", "This link is too old. Open the Wi-Fi page again."); return true; }
+    ssid++;
+    if (path[0] == 'x') {
+        if (g->net.wifi_forget) g->net.wifi_forget(g->net.user, ssid);
+        snprintf(g->wifi_note, sizeof g->wifi_note, "Forgot %s.", ssid);
+        wifi_page(g);
+        return true;
+    }
+    const char *q = strchr(path, '?');
+    char pw[72];
+    if (!q || !query_value(q + 1, "p", pw, sizeof pw)) {
+        wifi_ask(g, (uint32_t)strtoul(path + 1, NULL, 10), ssid);
+        return true;
+    }
+    logf_(g, "joining %s", ssid);
+    if (!g->net.wifi_join || !g->net.wifi_join(g->net.user, ssid, pw)) {
+        snprintf(g->wifi_note, sizeof g->wifi_note, "Could not join %s.", ssid);
+        wifi_page(g);
+        return true;
+    }
+    snprintf(g->wifi_note, sizeof g->wifi_note, "Saved %s: it is joined for the next page.", ssid);
+    wifi_page(g);
+    return true;
+}
+
 /* ---- requests ---- */
 
 static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *url, const char *body)
@@ -602,6 +751,7 @@ static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *ur
     }
     if (!strncasecmp(url, ALIAS_HOST, strlen(ALIAS_HOST))) {
         const char *p = url + strlen(ALIAS_HOST);
+        if (wifi_request(g, p)) return;
         char kind = (*p == 'f' || *p == 'p') ? *p++ : 'u';
         const char *query = strchr(p, '?');
         const char *a = alias_get(g, (uint32_t)strtoul(p, NULL, 10));
@@ -726,6 +876,7 @@ uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
         beacon(g);
     }
     if (g->state == FETCH) fetch_step(g);
+    if (g->state == WIFI) wifi_step(g);
     if (g->tx_busy && (int32_t)(now_ms - g->tx_at) >= 0) {
         if (g->tries >= TRIES) {
             logf_(g, "%08x stopped answering", (unsigned)g->to);
@@ -735,6 +886,7 @@ uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
         }
     }
     if (g->state == FETCH) return 5;
+    if (g->state == WIFI) return 100;
     uint32_t wait = g->next_beacon - now_ms;
     if (g->tx_busy && g->tx_at - now_ms < wait) wait = g->tx_at - now_ms;
     return wait;

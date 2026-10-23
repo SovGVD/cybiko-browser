@@ -1,7 +1,8 @@
 /* The gate against a pretend Cybiko: asks for URL as the WAP browser does,
  * acknowledges every part, puts the WML together and prints it.
  *
- *   test_gate [-q] URL...   -q: check the parts only, print nothing
+ *   test_gate [-q] [-w] URL...   -q: check the parts only, print nothing;
+ *                               -w: a pretend Wi-Fi (for http://c/wifi)
  *
  * The URLs are asked for one after another from the same gate, so later
  * ones can be the gate's short URLs from earlier pages (http://c/...). */
@@ -26,6 +27,30 @@ static void rf_send(void *user, const uint8_t *pkt, size_t len, uint8_t ch)
 }
 
 static bool quiet;
+
+/* -w: a pretend Wi-Fi, for the gate's Wi-Fi page */
+static char fake_saved[5][33];
+static int fake_n, fake_scans;
+static int fw_status(void *u, char *t, size_t cap) { (void)u; snprintf(t, cap, fake_n ? "%s, 10.0.0.2" : "not joined", fake_saved[0]); return fake_n ? 1 : -1; }
+static int fw_scan(void *u, cyb_ap_t *aps, int max)
+{
+    (void)u;
+    if (!aps) { fake_scans = 3; return -1; }
+    if (fake_scans > 0) { fake_scans--; return -1; }
+    const char *names[] = { "Home <5G>", "Cafe & Bar", "Neighbour$" };
+    int n = 0;
+    for (; n < 3 && n < max; n++) { snprintf(aps[n].ssid, 33, "%s", names[n]); aps[n].rssi = (int8_t)(-40 - 10 * n); aps[n].open = n == 1; }
+    return n;
+}
+static bool fw_join(void *u, const char *ssid, const char *pw)
+{
+    (void)u;
+    if (!quiet) fprintf(stderr, "join [%s] [%s]\n", ssid, pw);
+    if (fake_n < 5) snprintf(fake_saved[fake_n++], 33, "%s", ssid);
+    return true;
+}
+static int fw_saved(void *u, char (*ssids)[33], int max) { (void)u; int i = 0; for (; i < fake_n && i < max; i++) memcpy(ssids[i], fake_saved[i], 33); return i; }
+static bool fw_forget(void *u, const char *ssid) { (void)u; if (!quiet) fprintf(stderr, "forget [%s]\n", ssid); fake_n = 0; return true; }
 static void log_line(void *user, const char *line)
 {
     (void)user;
@@ -48,10 +73,21 @@ static void header(uint8_t *p, size_t len, uint32_t to, uint8_t type, uint8_t nu
 int main(int argc, char **argv)
 {
     int a = 1;
-    if (a < argc && !strcmp(argv[a], "-q")) { quiet = true; a++; }
+    bool wifi = false;
+    for (; a < argc && argv[a][0] == '-'; a++) {
+        if (!strcmp(argv[a], "-q")) quiet = true;
+        else if (!strcmp(argv[a], "-w")) wifi = true;
+    }
     if (a >= argc) { fprintf(stderr, "usage: test_gate [-q] URL\n"); return 2; }
     cyb_net_t net;
     cyb_net_curl(&net, NULL);
+    if (wifi) {
+        net.wifi_status = fw_status;
+        net.wifi_scan = fw_scan;
+        net.wifi_join = fw_join;
+        net.wifi_saved = fw_saved;
+        net.wifi_forget = fw_forget;
+    }
     cy_gate_host_t host = { .rf_send = rf_send, .log = log_line };
     cy_gate_t *g = cy_gate_create(GATE, &host, &net);
     uint32_t now = 0;

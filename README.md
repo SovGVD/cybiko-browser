@@ -46,7 +46,11 @@ browser's limit) with a "More..." link to the rest. Long links and forms go
 through short gate URLs (`http://c/12`) to keep pages small. WML pages are
 passed on as they are. The WAP browser's Home (the long gone cybiko.com
 site) opens the gate's own page, with FrogFind search and a few text-only
-sites, or `wap.home` from `cybiko.cfg`.
+sites, or `wap.home` from `cybiko.cfg`. Its **Wi-Fi setup** link
+(`http://c/wifi`) shows the networks around and the saved ones: pick one,
+type its password and the gate joins it for the next page; Forget drops a
+saved one. The list is the one the Palm OS Wi-Fi gateway uses (ESP32 NVS),
+so a network saved in either mode works in both.
 
 A page comes in at about 275 bytes a second (a full 5000-byte deck in about
 18 s), since every 87-byte part goes over the emulated radio and waits for
