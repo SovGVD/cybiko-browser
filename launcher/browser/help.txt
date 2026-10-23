@@ -1,9 +1,0 @@
-Browser
-
-Opens web pages through the Wi-Fi of the board the emulator runs on.
-
-Up/Down: next or previous link, or scroll
-Left/Right: page up and down
-Enter: open the link, edit the field
-Esc: back
-Menu: address, home, Wi-Fi, reload, exit

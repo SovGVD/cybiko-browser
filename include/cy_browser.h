@@ -99,6 +99,6 @@ bool cyb_busy(const cyb_t *b);
  * (and leaves fb alone) when nothing changed since the last call. */
 bool cyb_render(cyb_t *b, uint8_t *fb);
 
-/* The CyOS launcher application, to put on the RAM disk as "Browser.app". */
+/* The Browser application (cyapp/), to put on the RAM disk as "Browser.app". */
 extern const uint8_t *const cyb_launcher_app;
 extern const size_t cyb_launcher_app_size;

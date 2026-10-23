@@ -1,0 +1,11 @@
+Browser
+
+Web pages through the Cybiko Internet Gate (the Dragonfruit board's Wi-Fi).
+
+Up/Down: next or previous link or field, or scroll
+Left/Right: page up and down
+Enter: open the link, change the field (on nothing: the menu)
+Del: back
+Esc: stop loading, back, or close
+Help: menu (address, home, Wi-Fi, reload, text size, exit)
+Typing a letter: go to an address, or search the words

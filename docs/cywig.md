@@ -67,7 +67,14 @@ The data of a message packet (104 bytes in a long packet, 14 in a short one):
 | 2-3 | msg id |
 | | p0, p1 (32 bits each, when flagged) |
 | | to: a port number, or a NUL-ended process name |
-| | data length (1 byte), then the data |
+| | data length (1 byte), then the data (with flag 02: no length, the data runs to the end of the packet) |
+
+A message too big for one packet (seen from CyOS 1.5 sending a long URL)
+goes in parts: header byte 10 is the part, from 1, and byte 11 how many
+there are (a message in one packet has 0 and its message number there).
+The first part is the start of the message with flag 02. The last part has
+`03 00`, a length byte and the rest of the data; each part is acknowledged
+like a message of its own.
 
 ## The WAP exchange
 
@@ -89,3 +96,15 @@ The page is WML as text (the browser has its own parser: `card`, `p`, `a`,
 `small`, `br`, `timer`, `onevent` and so on). While a page comes in, the
 browser checks every 5 seconds that the gate is still the best one, and
 says "No connection" if not.
+
+## The Browser app
+
+The Browser app (`cyapp/`) asks the gate the same way, with p0 = 0x21
+(0x121 for the bigger font). The gate answers with msg 1022 messages to the
+process `Browser`, numbered as above, and the page laid out for the
+Cybiko's screen instead of WML: boxes of text in one of CyOS's four fonts
+at their places, form fields, rules and picture frames, then a table of
+the links and fields. A long page comes in parts of at most 2500 bytes
+(about 9 s), each ending with a link to the next part. The format is in
+[gate/cy_page.h](../gate/cy_page.h).
+

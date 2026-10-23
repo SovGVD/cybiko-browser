@@ -28,7 +28,11 @@
  * number and the URL as data; the gate answers with msg 1022 to process
  * "WAP": p0 = number << 16 | 6, p1 = page size << 16 | part size and part
  * of the WML page as data, the number going up by one for each part (or
- * p0 = 5, p1 = an HTTP status for an error). */
+ * p0 = 5, p1 = an HTTP status for an error).
+ *
+ * The Browser application (cyapp/) asks with p0 = 0x21 (0x121 for the
+ * bigger font) and gets the page laid out for its screen (cy_page.h) in
+ * messages to process "Browser", numbered the same way. */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -51,6 +55,11 @@ void cy_gate_destroy(cy_gate_t *g);
 /* The page shown for the WAP browser's home page (the Cybiko site, long
  * gone): NULL or "" for the gate's own, with a search box and a few sites. */
 void cy_gate_set_home(cy_gate_t *g, const char *url);
+
+/* CyOS's fonts, from the Cybiko's flash image, for laying pages out for the
+ * Browser application (cy_page.h). Until then a plain font of the same
+ * heights is used. The image is only read during the call. */
+void cy_gate_set_fonts(cy_gate_t *g, const uint8_t *flash, size_t len);
 
 /* A packet heard on the radio (50 or 200 bytes). */
 void cy_gate_rf_in(cy_gate_t *g, const uint8_t *pkt, size_t len, uint8_t ch);

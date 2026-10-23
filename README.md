@@ -4,32 +4,39 @@ A small web browser for the emulated Cybiko Xtreme in
 [Dragonfruit](https://github.com/sovgvd/dragonfruit-jc4827w543-esp32), the
 Palm OS and Cybiko emulator for the JC4827W543 ESP32-S3 board.
 
-It shows plain HTML pages on the Cybiko's 160x100 screen in four shades of
-gray: text with headings, lists, links, preformatted text, forms (text,
-password, check boxes, radio buttons, lists, GET and POST) and pictures
-(JPEG, PNG, GIF), turned to four grays with dithering. It has history,
-bookmarks, a home page with FrogFind search, settings and Wi-Fi setup.
-Scripts and style sheets are not run, so the sites made for old or small
-screens (FrogFind, 68k.news, text-only news sites) work best.
+**Browser** is a native CyOS application on the Cybiko (`cyapp/`). It
+gets web pages from a Cybiko Internet Gate over the Cybiko radio, the way
+the Xtreme's own WAP browser does, and the gate (`gate/`) runs on the
+ESP32 next to the emulator, fetching over the board's Wi-Fi. The Xtreme's
+WAP browser uses the same gate.
+
+It shows plain HTML pages on the Cybiko's 160x100 screen: text in CyOS's
+own fonts with bold and headings, lists, links, preformatted text, rules
+and forms (text, password, check boxes, radio buttons, lists, GET and
+POST). Pictures are shown as frames or their `alt` text. Scripts and style
+sheets are not run, so the sites made for old or small screens (FrogFind,
+68k.news, text-only news sites) work best.
 
 ## How it works
 
-The Cybiko desktop gets a **Browser** app (`launcher/`). It is a tiny native
-CyOS program (504 bytes) built with `gcc-h8300-hms`. When it runs it asks
-the emulator, with the undefined H8S opcode `0x0042` (`CY_APP_OP`), to open
-the browser. The emulator then pauses CyOS, and the browser engine, plain C
-running on the ESP32 next to the emulator, owns the screen and the keys and
-fetches pages over the board's Wi-Fi. Closing the browser hands everything
-back to CyOS where it stopped.
+The gate does the web and the Cybiko only draws. Browser sends the URL to
+the gate as a radio message (msg 1022 to port 93, as the WAP browser does,
+with its own request kind). The gate fetches the page, parses the HTML and
+lays it out for the Cybiko's screen with the same fonts CyOS has (read from
+the CyOS flash image), then sends back what to draw: boxes of text at their
+places, form fields, rules, and a table of links and fields
+([gate/cy_page.h](gate/cy_page.h)). A long page comes in parts of at most
+2500 bytes, about 9 seconds each over the radio, with a "Next part" link
+at the end. Long links and forms become short gate URLs (`http://c/12`),
+so what goes over the radio stays small.
 
-The engine draws with the Cybiko's own fonts, read from the CyOS flash
-image, so pages look like the rest of the system.
+On the Cybiko, Browser draws the page into CyOS's screen buffer, scrolls,
+moves between links and fields, edits text fields and lists, sends forms
+and keeps a history. It is about 10 KB, built with `gcc-h8300-hms`, and
+calls CyOS by its exported functions like any CyOS application.
 
-Why not a real CyOS app that draws the page itself? CyOS apps draw with the
-CyWin C++ framework, whose entry points (and the SDK's libraries) aren't
-documented or available, and the H8S at 11 MHz would be slow at decoding
-pictures anyway. Running the engine on the ESP32 avoids both, and the CyOS
-side stays tiny.
+Since the Cybiko side is a normal CyOS application talking over the radio,
+it would work on a real Xtreme too, given a gate it can hear.
 
 ## The WAP gate (CyWIG)
 
@@ -62,43 +69,37 @@ and the WAP browser, is in [docs/cywig.md](docs/cywig.md).
 
 | Key | In a page |
 | --- | --- |
-| Up, Down | next link or field, or scroll |
+| Up, Down | next or previous link or field, or scroll |
 | Left, Right | page up, page down |
-| Enter | open the link, change the field |
-| Esc, Del | back (Esc on the first page closes the browser) |
-| Menu | address, back, forward, reload, home, bookmarks, Wi-Fi, settings, close |
-| Help | the key help page |
+| Enter | open the link, edit the field, tick the box, pick from the list (on nothing: the menu) |
+| Del | back |
+| Esc | stop loading, back, or close on the first page |
+| Help | menu: address, home, Wi-Fi setup, reload, back, text size, exit |
 | a letter | opens the address line: a web address, or words to search with FrogFind |
 
-Typing: Shift gives capitals (press it before the letter or hold it). Fn
-with Q..P gives 1..0, with A..L `@ # $ % & * - + =`, with Z..M
-`< > " _ { } '`. In the address line Del deletes, Left and Right move,
-Enter goes, Esc cancels.
+In a text field or the address line Enter keeps it, Esc cancels and Del
+deletes.
 
-## Files on the SD card
+## Wi-Fi
 
-The browser keeps `bookmarks.txt` (one `url<TAB>title` per line) and
-`settings.txt` in `/Cybiko/browser/` on the card. Wi-Fi networks are shared
-with Palm OS mode (the same saved list), and new ones can be joined from the
-browser's Wi-Fi page.
-
-Pictures can be turned off in the settings. A picture is shown at most
-156x180 pixels; bigger ones are scaled down. Progressive JPEGs aren't
-supported (they show as their `alt` text).
+The gate's home page has a **Wi-Fi setup** link (also in Browser's menu):
+the networks around and the saved ones. The list is the one the Palm OS
+Wi-Fi gateway uses (ESP32 NVS), so a network saved in either mode works in
+both.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `include/cy_browser.h` | the engine's API: create, key, step, draw |
-| `src/` | the engine: HTML parser, layout, fonts, text, URLs, pictures, the browser itself |
-| `src/cy_browser_app.h` | the Browser launcher app, generated by `launcher/build.sh` |
+| `src/` | the engine the gate uses: HTML parser, layout, fonts, text, URLs, pictures; and `cy_browser.c`, an earlier browser drawn by the ESP32 (used by `cyb_shot`) |
+| `cyapp/` | the Browser app for CyOS (`Browser.app` is kept built) |
+| `src/cy_browser_app.h` | Browser.app as a C array for the firmware, made by `cyapp/build.sh` |
 | `third_party/tjpgd/` | TJpgDec JPEG decoder (see THIRD_PARTY.md) |
-| `gate/` | the WAP gate: radio protocol, fetching (`cy_gate.c`), HTML to WML (`cy_wml.c`) |
+| `gate/` | the gate: radio protocol, fetching (`cy_gate.c`), pages for Browser (`cy_page.c`), HTML to WML (`cy_wml.c`) |
 | `docs/cywig.md` | the CyWIG radio and WAP protocol |
 | `port/esp32/` | fetching and Wi-Fi on the ESP32 (esp_http_client, HTTPS with the certificate bundle) |
 | `host/` | fetching on a PC, through `curl` |
-| `launcher/` | the CyOS launcher app sources |
 | `tools/` | the CyOS app packer (`cybiko_mkapp.py`) and Cy archive code |
 | `tests/` | engine checks, the `cyb_shot` page renderer, the gate test (`test_gate`) and test pages |
 | `dragonfruit/` | the emulator side: a patch for Dragonfruit and how to add it |
@@ -123,25 +124,19 @@ build/cyb_shot --flash cyos.bin --keys "down,down,enter" page.png http://frogfin
 `dump` for the page's items). With `--flash` it uses the fonts from a CyOS
 flash image; without it, a built-in block font.
 
-The launcher app needs `gcc-h8300-hms` and `binutils-h8300-hms` (Ubuntu
-packages): `cd launcher && APP_OUT=. ./build.sh` rebuilds `src/cy_browser_app.h` and
-`launcher/Browser.app`.
-
-The patched firmware installs Browser.app on the Cybiko by itself. A ready
-`launcher/Browser.app` is also in the repository, to copy to
-`/Cybiko/apps/` by hand. It works only in the patched Dragonfruit: on a real
-Cybiko or an unpatched emulator it can't open anything.
+Browser needs `gcc-h8300-hms` and `binutils-h8300-hms` (Ubuntu
+packages): `sh cyapp/build.sh` rebuilds `cyapp/Browser.app` and
+`src/cy_browser_app.h`. The patched firmware puts Browser.app on the
+Cybiko by itself; `cyapp/Browser.app` can also be copied to `/Cybiko/apps/`
+by hand.
 
 ## Status
 
-Tested on a PC: the engine checks, the test pages, and the whole path in
-Dragonfruit's headless Cybiko runner with CyOS 1.5.08 (the Browser app
-opens the browser, the menu works, closing it returns to the desktop). The
-firmware builds with ESP-IDF 6.0. Not yet tried on the board.
-
-The WAP gate was tested the same way: the WAP browser in Dragonfruit's
-Cybiko runner finds it, shows its home page, loads HTML pages from a local
-web server (up to the full 5000 bytes), and follows links. Forms and the
-"More..." parts are checked by `test_gate` only, and a URL longer than one
-radio part (about 88 characters, which the WAP browser would send in
-several parts) is not handled yet. Not yet tried on the board.
+Tested on a PC in Dragonfruit's headless Cybiko runner with CyOS 1.5.08
+and the gate on its radio (`cybiko_host --gate`): Browser opens the gate's
+home page, edits fields, ticks boxes, picks from lists, sends forms
+(also ones longer than one radio packet), follows the next part of a long
+page and goes back to where it was. Pages came from local files there (the
+test machine has no direct Internet). The Xtreme's WAP browser still works
+with the gate. `make test` checks the gate's pages for both. Not yet tried
+on the board.

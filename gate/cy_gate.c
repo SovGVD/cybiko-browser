@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include "cy_page.h"
 #include "cy_wml.h"
 
 #define SHORT 50
@@ -38,6 +39,12 @@
 #define WAP_POST 7                  /* (guessed: the browser's other request) */
 #define WAP_PART 6
 #define WAP_ERROR 5
+/* The Browser application (cyapp/) asks the same way with p0 = APP_GET
+ * (APP_BIG added for the bigger font) and gets the page laid out
+ * (cy_page.h) in messages to its process, numbered as the WAP browser's. */
+#define APP_GET 0x21
+#define APP_BIG 0x100
+#define APP_PROCESS "Browser"
 
 #define BEACON_MS 3000
 #define RETRY_MS 400
@@ -50,18 +57,16 @@
 
 /* The page shown for the Cybiko's own home page, long gone. */
 #define HOME_URL "http://www.cybiko.com/wap/index.asp"
-static const char home_wml[] =
-    "<?xml version=\"1.0\"?>\n<wml><card id=\"h\" title=\"CyWIG\"><p>"
-    "<b>Cybiko Internet Gate</b><br/>"
-    "Search the web:<br/><input name=\"q\"/>"
-    "<anchor>[Search]<go href=\"http://frogfind.com/\"><postfield name=\"q\" value=\"$(q)\"/></go></anchor><br/>"
-    "<a href=\"http://68k.news/\">68k.news</a><br/>"
-    "<a href=\"http://lite.cnn.com/\">CNN Lite</a><br/>"
-    "<a href=\"http://text.npr.org/\">NPR Text</a><br/>"
-    "<a href=\"http://wiby.me/\">Wiby search</a><br/>"
-    "<a href=\"http://wttr.in/?T0\">Weather</a><br/>"
-    "<a href=\"http://c/wifi\">Wi-Fi setup</a><br/>"
-    "</p></card></wml>";
+static const char home_html[] =
+    "<title>CyWIG</title><b>Cybiko Internet Gate</b><br>"
+    "<form action=\"http://frogfind.com/\">Search the web:<br><input name=\"q\" size=\"14\">"
+    "<input type=\"submit\" value=\"Search\"></form>"
+    "<a href=\"http://68k.news/\">68k.news</a><br>"
+    "<a href=\"http://lite.cnn.com/\">CNN Lite</a><br>"
+    "<a href=\"http://text.npr.org/\">NPR Text</a><br>"
+    "<a href=\"http://wiby.me/\">Wiby search</a><br>"
+    "<a href=\"http://wttr.in/?T0\">Weather</a><br>"
+    "<a href=\"http://c/wifi\">Wi-Fi setup</a><br>";
 
 enum { IDLE, FETCH, SEND, WIFI };
 
@@ -79,6 +84,8 @@ struct cy_gate {
     /* the request being answered */
     int state;
     uint32_t to;                    /* the Cybiko asking */
+    bool app;                       /* the Browser application, not WAP */
+    bool big;                       /* it wants the bigger font */
     uint16_t number;                /* its request number: the next part's */
     char url[1024];
     uint32_t fetch_until;
@@ -89,6 +96,7 @@ struct cy_gate {
     bool error;                     /* the answer is an error code */
     uint16_t status;
     cy_wml_pos_t start;             /* the part of the page asked for */
+    int32_t top;                    /* the same for the application */
 
     /* the message part in the air */
     uint8_t tx[LONG];
@@ -105,12 +113,21 @@ struct cy_gate {
     cyb_doc_t doc;
     char doc_url[1024];
     bool have_doc;
+    cyb_layout_t lay;               /* the page laid out for the application */
+    bool lay_ok, lay_big;
+    cyb_font_t fonts[F_COUNT];
 
     /* the Wi-Fi page waits for a scan or for joining a network */
     uint32_t wifi_until;
     char wifi_note[96];
 
     char home[256];
+
+    /* a message coming in parts */
+    uint8_t lp[1024];
+    size_t lp_len;
+    uint32_t lp_from;
+    unsigned lp_next;
     char *alias[ALIASES];
     uint32_t alias_next;            /* the next short URL's number */
 };
@@ -237,10 +254,17 @@ static void beacon(cy_gate_t *g)
 }
 
 /* The next part of the answer as a message to the WAP browser. */
+static const char *process(const cy_gate_t *g) { return g->app ? APP_PROCESS : WAP_PROCESS; }
+
+/* The most of the page one message part takes. */
+static size_t part_room(const cy_gate_t *g)
+{
+    return LONG_DATA - HEAD - (2 + 2 + 4 + 4 + strlen(process(g)) + 1 + 1);
+}
+
 static void send_part(cy_gate_t *g)
 {
     uint8_t *m = g->tx + HEAD;
-    size_t room = LONG_DATA - HEAD;
     if (++g->tx_number == 0) g->tx_number = 1;
     /* Message number 0 is delivered right away and acknowledged with code 0;
      * others get "got it" first and need a query for "delivered", which takes
@@ -257,12 +281,11 @@ static void send_part(cy_gate_t *g)
         put32(m + n, g->status); n += 4;
     } else {
         part = g->wml_len - g->wml_sent;
-        const size_t most = room - (2 + 2 + 4 + 4 + sizeof WAP_PROCESS + 1);
-        if (part > most) part = most;
+        if (part > part_room(g)) part = part_room(g);
         put32(m + n, (uint32_t)g->number << 16 | WAP_PART); n += 4;
         put32(m + n, (uint32_t)g->wml_len << 16 | (uint32_t)part); n += 4;
     }
-    memcpy(m + n, WAP_PROCESS, sizeof WAP_PROCESS); n += sizeof WAP_PROCESS;
+    memcpy(m + n, process(g), strlen(process(g)) + 1); n += strlen(process(g)) + 1;
     if (!g->error) {
         m[n++] = (uint8_t)part;
         memcpy(m + n, g->wml + g->wml_sent, part);
@@ -304,8 +327,7 @@ static void part_delivered(cy_gate_t *g)
     g->tx_busy = false;
     if (g->error) { finish(g); return; }
     size_t sent = g->wml_len - g->wml_sent;
-    const size_t most = LONG_DATA - HEAD - (2 + 2 + 4 + 4 + sizeof WAP_PROCESS + 1);
-    g->wml_sent += sent > most ? most : sent;
+    g->wml_sent += sent > part_room(g) ? part_room(g) : sent;
     if (++g->number == 0) g->number = 1;
     if (g->wml_sent >= g->wml_len) {
         logf_(g, "page sent to %08x", (unsigned)g->to);
@@ -323,24 +345,18 @@ static void answer(cy_gate_t *g, char *wml, size_t len)
     g->wml_sent = 0;
     g->error = false;
     g->state = SEND;
-    logf_(g, "sending %u bytes of WML to %08x", (unsigned)g->wml_len, (unsigned)g->to);
+    logf_(g, "sending %u bytes of %s to %08x", (unsigned)g->wml_len, g->app ? "page" : "WML", (unsigned)g->to);
     send_part(g);
 }
 
+static void app_text(cy_gate_t *g, const char *title, const char *text);
+
 static void answer_text(cy_gate_t *g, const char *title, const char *text)
 {
+    if (g->app) { app_text(g, title, text); return; }
     char *w = malloc(CY_WML_MAX + 1);
     if (!w) { finish(g); return; }
     answer(g, w, cy_wml_text(w, CY_WML_MAX, title, text));
-}
-
-static void answer_static(cy_gate_t *g, const char *wml)
-{
-    size_t n = strlen(wml);
-    char *w = malloc(n + 1);
-    if (!w) { finish(g); return; }
-    memcpy(w, wml, n + 1);
-    answer(g, w, n);
 }
 
 /* ---- short URLs ---- */
@@ -417,6 +433,14 @@ static void more_url(void *user, cy_wml_pos_t pos, char *out, size_t cap)
     snprintf(out, cap, ALIAS_HOST "p%u", (unsigned)alias_add(g, "M", s));
 }
 
+static void part_url(void *user, int32_t y, char *out, size_t cap)
+{
+    cy_gate_t *g = user;
+    char s[1100];
+    snprintf(s, sizeof s, "%ld %s", (long)y, g->doc_url);
+    snprintf(out, cap, ALIAS_HOST "y%u", (unsigned)alias_add(g, "Y", s));
+}
+
 /* The value of v<n> in a query the WAP browser made ("v3=a&v5=b"). */
 static bool query_value(const char *q, const char *var, char *out, size_t cap)
 {
@@ -461,12 +485,17 @@ static bool no_networks(cy_gate_t *g)
     return g->net.wifi_saved && g->net.wifi_saved(g->net.user, names, 1) == 0;
 }
 
+static bool own_page(cy_gate_t *g, const char *url);
+
+/* Fetches url from the web, or answers with one of the gate's own pages. */
 static void start_fetch(cy_gate_t *g, const char *url, const char *body)
 {
+    if (own_page(g, url)) return;
     if (no_networks(g) && offline_wifi(g, "No Wi-Fi network yet: pick one.")) return;
     snprintf(g->url, sizeof g->url, "%s", url);
     g->buf_len = 0;
     g->start = (cy_wml_pos_t){ 0, 0 };
+    g->top = 0;
     logf_(g, "fetch %s%s", url, body ? " (post)" : "");
     if (!g->net.open || !g->net.open(g->net.user, url, body, body ? "application/x-www-form-urlencoded" : NULL)) {
         const char *why = g->net.error ? g->net.error(g->net.user) : NULL;
@@ -529,14 +558,59 @@ static bool type_is(const char *ct, const char *what)
     return ct && !strncasecmp(ct, what, strlen(what));
 }
 
-/* The page from g->start on, as WML. */
+/* A page laid out for the application, from y = top on. */
+static void send_layout(cy_gate_t *g, const cyb_doc_t *d, const cyb_layout_t *l, int32_t top)
+{
+    uint8_t *w = malloc(CY_PAGE_MAX);
+    if (!w) { finish(g); return; }
+    cy_page_links_t k = { g, link_url, form_url, part_url };
+    answer(g, (char *)w, cy_page_part(d, l, &top, w, CY_PAGE_MAX, &k));
+}
+
+/* The page from g->start (g->top) on, as WML (or laid out). */
 static void send_doc(cy_gate_t *g)
 {
+    if (g->app) {
+        if (!g->lay_ok || g->lay_big != g->big) {
+            cyb_layout(&g->lay, &g->doc, g->fonts, g->big);
+            g->lay_ok = true;
+            g->lay_big = g->big;
+        }
+        send_layout(g, &g->doc, &g->lay, g->top);
+        return;
+    }
     char *w = malloc(CY_WML_MAX + 1);
     if (!w) { finish(g); return; }
     cy_wml_links_t l = { g, link_url, form_url, more_url };
     cy_wml_pos_t pos = g->start;
     answer(g, w, cy_wml_page(&g->doc, &pos, w, CY_WML_MAX, &l));
+}
+
+/* A message for the application: a page of its own, so the page kept for
+ * its further parts stays. */
+static void app_text(cy_gate_t *g, const char *title, const char *text)
+{
+    cyb_doc_t d = { 0 };
+    cyb_layout_t l = { 0 };
+    cyb_html_parse(&d, text, strlen(text), ALIAS_HOST, CS_LATIN1, true);
+    snprintf(d.title, sizeof d.title, "%s", title);
+    cyb_layout(&l, &d, g->fonts, g->big);
+    send_layout(g, &d, &l, 0);
+    cyb_layout_free(&l);
+    cyb_doc_free(&d);
+}
+
+/* One of the gate's own pages (Latin-1 HTML), shown as a web page is. */
+static void show_html(cy_gate_t *g, const char *html, const char *url)
+{
+    cyb_doc_free(&g->doc);
+    cyb_html_parse(&g->doc, html, strlen(html), url, CS_LATIN1, false);
+    snprintf(g->doc_url, sizeof g->doc_url, "%s", url);
+    g->have_doc = true;
+    g->lay_ok = false;
+    g->start = (cy_wml_pos_t){ 0, 0 };
+    g->top = 0;
+    send_doc(g);
 }
 
 static void fetched(cy_gate_t *g)
@@ -549,7 +623,7 @@ static void fetched(cy_gate_t *g)
     g->net.close(g->net.user);
     g->state = IDLE;
     logf_(g, "got %u bytes, %s", (unsigned)g->buf_len, type[0] ? type : "no type");
-    if (type_is(type, "text/vnd.wap.wml")) {
+    if (type_is(type, "text/vnd.wap.wml") && !g->app) {
         /* a WAP page already */
         char *w = malloc(g->buf_len + 1);
         if (!w) { finish(g); return; }
@@ -576,6 +650,7 @@ static void fetched(cy_gate_t *g)
     cyb_html_parse(&g->doc, (const char *)g->buf, g->buf_len, g->url, cs, type_is(type, "text/plain"));
     snprintf(g->doc_url, sizeof g->doc_url, "%s", g->url);
     g->have_doc = true;
+    g->lay_ok = false;
     if (!g->doc.title[0]) cyb_url_host(g->url, g->doc.title, sizeof g->doc.title);
     send_doc(g);
 }
@@ -614,8 +689,8 @@ static void fetch_step(cy_gate_t *g)
 
 /* ---- the Wi-Fi page ---- */
 
-/* Text for WML: markup characters escaped, "$" doubled (WML variables). */
-static size_t wml_esc(char *out, size_t cap, const char *s)
+/* Text for HTML: markup characters escaped. */
+static size_t html_esc(char *out, size_t cap, const char *s)
 {
     size_t n = 0;
     for (; *s && n + 7 < cap; s++) {
@@ -625,7 +700,6 @@ static size_t wml_esc(char *out, size_t cap, const char *s)
         case '>': e = "&gt;"; break;
         case '&': e = "&amp;"; break;
         case '"': e = "&quot;"; break;
-        case '$': e = "$$"; break;
         }
         if (e) { size_t k = strlen(e); memcpy(out + n, e, k); n += k; }
         else if ((uint8_t)*s >= 0x20) out[n++] = *s;
@@ -634,64 +708,65 @@ static size_t wml_esc(char *out, size_t cap, const char *s)
     return n;
 }
 
+#define WIFI_PAGE_MAX 3000
+
 /* The page: what the gate is connected to, the saved networks (each can be
  * forgotten) and the ones around (each opens a page asking for its
  * password). Networks go into short URLs: "W" and the network's name. */
 static void wifi_page(cy_gate_t *g)
 {
-    char *w = malloc(CY_WML_MAX + 1);
+    char *w = malloc(WIFI_PAGE_MAX + 1);
     if (!w) { finish(g); return; }
     size_t n = 0;
     char e[200];
-#define PUT(...) do { int k_ = snprintf(w + n, CY_WML_MAX + 1 - n, __VA_ARGS__); \
-        if (k_ > 0) n = n + (size_t)k_ <= CY_WML_MAX ? n + (size_t)k_ : CY_WML_MAX; } while (0)
-    PUT("<?xml version=\"1.0\"?>\n<wml><card id=\"w\" title=\"Wi-Fi\"><p>");
-    if (g->wifi_note[0]) { wml_esc(e, sizeof e, g->wifi_note); PUT("<b>%s</b><br/>", e); }
+#define PUT(...) do { int k_ = snprintf(w + n, WIFI_PAGE_MAX + 1 - n, __VA_ARGS__); \
+        if (k_ > 0) n = n + (size_t)k_ <= WIFI_PAGE_MAX ? n + (size_t)k_ : WIFI_PAGE_MAX; } while (0)
+    PUT("<title>Wi-Fi</title>");
+    if (g->wifi_note[0]) { html_esc(e, sizeof e, g->wifi_note); PUT("<b>%s</b><br>", e); }
     char st[96] = "";
     int on = g->net.wifi_status(g->net.user, st, sizeof st);
-    wml_esc(e, sizeof e, st);
-    PUT("%s%s<br/>", on > 0 ? "Online: " : on == 0 ? "Connecting: " : "Offline. ", e);
+    html_esc(e, sizeof e, st);
+    PUT("%s%s<br>", on > 0 ? "Online: " : on == 0 ? "Connecting: " : "Offline. ", e);
     if (g->net.wifi_saved) {
         char names[5][33];
         int k = g->net.wifi_saved(g->net.user, names, 5);
-        if (k > 0) PUT("<b>Saved</b><br/>");
+        if (k > 0) PUT("<b>Saved</b><br>");
         for (int i = 0; i < k; i++) {
             uint32_t a = alias_add(g, "W", names[i]);
-            wml_esc(e, sizeof e, names[i]);
-            PUT("%s <a href=\"" ALIAS_HOST "x%u\">[forget]</a><br/>", e, (unsigned)a);
+            html_esc(e, sizeof e, names[i]);
+            PUT("%s <a href=\"" ALIAS_HOST "x%u\">[forget]</a><br>", e, (unsigned)a);
         }
     }
     if (g->net.wifi_scan) {
         cyb_ap_t aps[12];
         int k = g->net.wifi_scan(g->net.user, aps, 12);
-        PUT("<b>Networks here</b> <a href=\"" ALIAS_HOST "wifi?scan\">[look again]</a><br/>");
-        if (k < 0) PUT("Still looking...<br/>");
-        else if (!k) PUT("None found.<br/>");
-        for (int i = 0; i < k && n + 300 < CY_WML_MAX; i++) {
+        PUT("<b>Networks here</b> <a href=\"" ALIAS_HOST "wifi?scan\">[look again]</a><br>");
+        if (k < 0) PUT("Still looking...<br>");
+        else if (!k) PUT("None found.<br>");
+        for (int i = 0; i < k && n + 300 < WIFI_PAGE_MAX; i++) {
             uint32_t a = alias_add(g, "W", aps[i].ssid);
-            wml_esc(e, sizeof e, aps[i].ssid);
-            PUT("<a href=\"" ALIAS_HOST "j%u\">%s</a> %d%s<br/>", (unsigned)a, e, aps[i].rssi, aps[i].open ? " open" : "");
+            html_esc(e, sizeof e, aps[i].ssid);
+            PUT("<a href=\"" ALIAS_HOST "j%u\">%s</a> %d%s<br>", (unsigned)a, e, aps[i].rssi, aps[i].open ? " open" : "");
         }
     }
-    PUT("<a href=\"" ALIAS_HOST "\">Home</a></p></card></wml>");
+    PUT("<a href=\"" ALIAS_HOST "\">Home</a>");
 #undef PUT
     g->wifi_note[0] = 0;
-    answer(g, w, n);
+    show_html(g, w, ALIAS_HOST "wifi");
+    free(w);
 }
 
 /* Asks for the password of network a (a short URL's number). */
 static void wifi_ask(cy_gate_t *g, uint32_t a, const char *ssid)
 {
-    char *w = malloc(CY_WML_MAX + 1);
-    if (!w) { finish(g); return; }
-    char e[200];
-    wml_esc(e, sizeof e, ssid);
-    snprintf(w, CY_WML_MAX + 1,
-             "<?xml version=\"1.0\"?>\n<wml><card id=\"j\" title=\"Wi-Fi\"><p>"
-             "<b>%s</b><br/>Password (empty if open):<br/><input name=\"pw\" type=\"password\"/><br/>"
-             "<anchor>[Join]<go href=\"" ALIAS_HOST "j%u\"><postfield name=\"p\" value=\"$(pw)\"/></go></anchor><br/>"
-             "<a href=\"" ALIAS_HOST "wifi\">Back</a></p></card></wml>", e, (unsigned)a);
-    answer(g, w, strlen(w));
+    char w[800], e[200], url[32];
+    html_esc(e, sizeof e, ssid);
+    snprintf(url, sizeof url, ALIAS_HOST "j%u", (unsigned)a);
+    snprintf(w, sizeof w,
+             "<title>Wi-Fi</title><b>%s</b><br><form action=\"%s\">Password (empty if open):<br>"
+             "<input name=\"p\" type=\"password\" size=\"14\"><br><input type=\"submit\" value=\"Join\"></form>"
+             "<a href=\"" ALIAS_HOST "wifi\">Back</a>", e, url);
+    show_html(g, w, url);
 }
 
 /* Waits (in cy_gate_poll) for the scan to finish, then shows the page. */
@@ -756,7 +831,8 @@ static bool wifi_request(cy_gate_t *g, const char *path)
 
 /* ---- requests ---- */
 
-static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *url, const char *body)
+static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *url, const char *body,
+                    bool app, bool big)
 {
     if (g->state != IDLE) {
         if (from != g->to) {
@@ -768,40 +844,61 @@ static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *ur
     }
     g->to = from;
     g->number = number;
-    logf_(g, "%08x asks for %s", (unsigned)from, url);
-    if (!strcasecmp(url, HOME_URL) || !strcasecmp(url, "http://www.cybiko.com/") || !strcasecmp(url, "http://c/")) {
-        if (g->home[0]) start_fetch(g, g->home, NULL);
-        else if (!(no_networks(g) && offline_wifi(g, "No Wi-Fi network yet: pick one."))) answer_static(g, home_wml);
-        return;
-    }
-    if (!strncasecmp(url, ALIAS_HOST, strlen(ALIAS_HOST))) {
-        const char *p = url + strlen(ALIAS_HOST);
-        if (wifi_request(g, p)) return;
-        char kind = (*p == 'f' || *p == 'p') ? *p++ : 'u';
-        const char *query = strchr(p, '?');
-        const char *a = alias_get(g, (uint32_t)strtoul(p, NULL, 10));
-        if (!a) { answer_text(g, "Expired", "This link is too old. Open the page again."); return; }
-        if (kind == 'u' && a[0] == 'U') { start_fetch(g, a + 1, NULL); return; }
-        if (kind == 'f' && (a[0] == 'F' || a[0] == 'P')) { form_submit(g, a + 1, a[0] == 'P', query ? query + 1 : ""); return; }
-        if (kind == 'p' && a[0] == 'M') {
-            unsigned item = 0, off = 0;
-            int used = 0;
-            if (sscanf(a + 1, "%u %u %n", &item, &off, &used) >= 2) {
-                const char *page = a + 1 + used;
-                if (g->have_doc && !strcmp(page, g->doc_url) && item < g->doc.n_items) {
-                    g->start = (cy_wml_pos_t){ item, off };
-                    send_doc(g);
-                    return;
-                }
-                start_fetch(g, page, NULL);
-                g->start = (cy_wml_pos_t){ item, off };
-                return;
-            }
-        }
-        answer_text(g, "Expired", "This link is too old. Open the page again.");
-        return;
-    }
+    g->app = app;
+    g->big = big;
+    logf_(g, "%08x asks for %s%s", (unsigned)from, url, app ? " (Browser)" : "");
     start_fetch(g, url, body);
+}
+
+/* The Cybiko's home page and the short URLs. */
+static bool own_page(cy_gate_t *g, const char *url)
+{
+    if (!strcasecmp(url, HOME_URL) || !strcasecmp(url, "http://www.cybiko.com/") || !strcasecmp(url, ALIAS_HOST)) {
+        if (g->home[0] && strcasecmp(g->home, url)) start_fetch(g, g->home, NULL);
+        else if (!(no_networks(g) && offline_wifi(g, "No Wi-Fi network yet: pick one."))) show_html(g, home_html, ALIAS_HOST);
+        return true;
+    }
+    if (strncasecmp(url, ALIAS_HOST, strlen(ALIAS_HOST))) return false;
+    const char *p = url + strlen(ALIAS_HOST);
+    if (wifi_request(g, p)) return true;
+    char kind = (*p == 'f' || *p == 'p' || *p == 'y') ? *p++ : 'u';
+    const char *query = strchr(p, '?');
+    const char *a = alias_get(g, (uint32_t)strtoul(p, NULL, 10));
+    if (!a) { answer_text(g, "Expired", "This link is too old. Open the page again."); return true; }
+    if (kind == 'u' && a[0] == 'U') { start_fetch(g, a + 1, NULL); return true; }
+    if (kind == 'f' && (a[0] == 'F' || a[0] == 'P')) { form_submit(g, a + 1, a[0] == 'P', query ? query + 1 : ""); return true; }
+    if (kind == 'p' && a[0] == 'M') {
+        unsigned item = 0, off = 0;
+        int used = 0;
+        if (sscanf(a + 1, "%u %u %n", &item, &off, &used) >= 2) {
+            const char *page = a + 1 + used;
+            if (g->have_doc && !strcmp(page, g->doc_url) && item < g->doc.n_items) {
+                g->start = (cy_wml_pos_t){ item, off };
+                send_doc(g);
+                return true;
+            }
+            start_fetch(g, page, NULL);
+            g->start = (cy_wml_pos_t){ item, off };
+            return true;
+        }
+    }
+    if (kind == 'y' && a[0] == 'Y') {
+        long y = 0;
+        int used = 0;
+        if (sscanf(a + 1, "%ld %n", &y, &used) >= 1 && y >= 0) {
+            const char *page = a + 1 + used;
+            if (g->have_doc && !strcmp(page, g->doc_url)) {
+                g->top = (int32_t)y;
+                send_doc(g);
+                return true;
+            }
+            start_fetch(g, page, NULL);
+            g->top = (int32_t)y;
+            return true;
+        }
+    }
+    answer_text(g, "Expired", "This link is too old. Open the page again.");
+    return true;
 }
 
 /* A message for the gate. */
@@ -818,13 +915,15 @@ static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
     size_t dl = 0;
     if ((flags & M_DATA) && n < len) {
         dl = (flags & 0x02) ? len - n : m[n++];
+        if (flags & 0x02) while (dl && n + dl <= len && m[n + dl - 1] == 0) dl--;
         if (n + dl > len) dl = len - n;
     }
-    if (id != MSG_WAP || (flags & 0x02)) {
+    if (id != MSG_WAP) {
         logf_(g, "msg %04x from %08x (flags %02x) not handled", id, (unsigned)from, flags);
         return;
     }
-    if ((p0 & 0xffff) != WAP_GET && (p0 & 0xffff) != WAP_POST) {
+    const bool app = (p0 & 0xff) == APP_GET;
+    if ((p0 & 0xffff) != WAP_GET && (p0 & 0xffff) != WAP_POST && !app) {
         logf_(g, "WAP request %08x from %08x not handled", (unsigned)p0, (unsigned)from);
         return;
     }
@@ -835,7 +934,38 @@ static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
     char body[128];
     const bool post = (p0 & 0xffff) == WAP_POST && ul + 1 < dl;
     if (post) snprintf(body, sizeof body, "%.*s", (int)(dl - ul - 1), (const char *)m + n + ul + 1);
-    request(g, from, (uint16_t)p1, url, post ? body : NULL);
+    request(g, from, (uint16_t)p1, url, post ? body : NULL, app, app && (p0 & APP_BIG));
+}
+
+/* A message too big for one packet comes in parts: byte 10 is the part
+ * (from 1), byte 11 how many. The first is a message's start whose data
+ * runs to the end of the packet (flag 02); the others have two bytes
+ * (03 00 on the last) and the length of their data, or run to the end. */
+static void long_part(cy_gate_t *g, const uint8_t *pkt, size_t data)
+{
+    const uint32_t from = get32(pkt + 4);
+    const uint8_t *m = pkt + HEAD;
+    const unsigned part = pkt[10], parts = pkt[11];
+    if (part == 1) {
+        g->lp_from = from;
+        g->lp_next = 2;
+        g->lp_len = 0;
+        memcpy(g->lp, m, data);
+        g->lp_len = data;
+    } else {
+        if (from != g->lp_from || part != g->lp_next || data < 3) return;
+        size_t n = m[0] & 1 ? m[2] : data - 2;
+        const uint8_t *d = m + (m[0] & 1 ? 3 : 2);
+        if (d + n > m + data) n = (size_t)(m + data - d);
+        if (g->lp_len + n > sizeof g->lp) n = sizeof g->lp - g->lp_len;
+        memcpy(g->lp + g->lp_len, d, n);
+        g->lp_len += n;
+        g->lp_next++;
+    }
+    if (part == parts && part > 1) {
+        g->lp_next = 0;
+        message(g, from, g->lp, g->lp_len);
+    }
 }
 
 static bool seen_before(cy_gate_t *g, const uint8_t *pkt)
@@ -866,7 +996,7 @@ void cy_gate_rf_in(cy_gate_t *g, const uint8_t *pkt, size_t len, uint8_t ch)
         const bool repeat = seen_before(g, pkt);
         if (pkt[9] & F_ACK_ME) ack(g, pkt, ACK_DELIVERED);
         if (!repeat) {
-            if (pkt[10]) logf_(g, "message part %u from %08x not handled", pkt[10], (unsigned)from);
+            if (pkt[10]) long_part(g, pkt, data);
             else message(g, from, pkt + HEAD, data);
         }
         break;
@@ -883,7 +1013,7 @@ void cy_gate_rf_in(cy_gate_t *g, const uint8_t *pkt, size_t len, uint8_t ch)
                 /* ask whether it reached the WAP browser */
                 if (!g->tx_query) { g->tx_query = true; g->tries = 0; g->tx_at = g->now + 50; }
             } else if (code == ACK_NOBODY) {
-                logf_(g, "%08x: no WAP browser running", (unsigned)from);
+                logf_(g, "%08x: no %s running", (unsigned)from, g->app ? "Browser" : "WAP browser");
                 finish(g);
             }
         }
@@ -917,6 +1047,13 @@ uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
     return wait;
 }
 
+void cy_gate_set_fonts(cy_gate_t *g, const uint8_t *flash, size_t len)
+{
+    cyb_fonts_free(g->fonts);
+    cyb_fonts_load(g->fonts, flash, len);
+    g->lay_ok = false;
+}
+
 void cy_gate_set_home(cy_gate_t *g, const char *url)
 {
     snprintf(g->home, sizeof g->home, "%s", url ? url : "");
@@ -938,6 +1075,7 @@ cy_gate_t *cy_gate_create(uint32_t id, const cy_gate_host_t *host, const cyb_net
     g->host = *host;
     g->net = *net;
     g->channel = 2;                 /* CyOS's */
+    cyb_fonts_load(g->fonts, NULL, 0);
     rs_init();
     return g;
 }
@@ -947,6 +1085,8 @@ void cy_gate_destroy(cy_gate_t *g)
     if (!g) return;
     finish(g);
     cyb_doc_free(&g->doc);
+    cyb_layout_free(&g->lay);
+    cyb_fonts_free(g->fonts);
     for (int i = 0; i < ALIASES; i++) free(g->alias[i]);
     free(g->buf);
     free(g);

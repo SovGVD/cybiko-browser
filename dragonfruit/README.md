@@ -27,8 +27,9 @@ The browser and the WAP gate need a few changes on the emulator side. They are i
   samples it 15 ms into each packet to rank the gates it hears; before, it
   read 0 and never picked a gate, so the WAP browser kept waiting.
 - **cybiko_app** (the firmware's Cybiko mode):
-  - `cybiko_browser.c`: installs Browser.app on the RAM disk when it's
-    missing or old, answers the app's call, and runs the browser in its own
+  - `cybiko_browser.c`: installs Browser.app (the native app, `cyapp/`) on
+    the RAM disk when it's missing or old. It also answers the call of the
+    earlier launcher app and runs the ESP32-drawn browser in its own
     task (16 KB stack, internal RAM first, PSRAM if that's short) while the
     CPU task waits. On close it stops Wi-Fi and gives the radio back to the
     Cybiko link.
@@ -38,13 +39,15 @@ The browser and the WAP gate need a few changes on the emulator side. They are i
     and `cybiko_link_resume()` puts ESP-NOW back on its channel.
   - `cybiko_gate.c`: the WAP gate (`gate/cy_gate.h`) in a task of its own,
     on the emulated radio of the board's own Cybiko. Its ID is the
-    machine's with the first byte changed. Keys in `/Cybiko/cybiko.cfg`:
+    machine's with the first byte changed. It lays Browser's pages out with
+    the fonts of the CyOS flash image. Keys in `/Cybiko/cybiko.cfg`:
     `wap.gate = off` turns it off, `wap.home = URL` sets the page Home
     opens. It pauses while the browser has the network.
   - `CMakeLists.txt`: requires the `cy_browser` component.
 - **host** (the PC builds): `cybiko_host --browse-url URL --browse KEYS` and
   the SDL `cybiko` app open the browser, fetching with `curl`.
-  `cybiko_host --gate [--gate-home URL]` puts the WAP gate on the radio. Built only when
+  `cybiko_host --gate [--gate-home URL]` puts the gate on the radio (with
+  the fonts of `--flash`). Built only when
   `src/components/cy_browser` is there (not on Windows).
 
 Without the submodule the firmware won't build (cybiko_app requires

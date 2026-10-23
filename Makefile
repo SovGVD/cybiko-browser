@@ -6,7 +6,7 @@ CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-format-truncation \
 	-Iinclude -Isrc -Ithird_party/tjpgd -Ihost -Igate
 SRC = src/cy_browser.c src/cyb_font.c src/cyb_html.c src/cyb_image.c \
 	src/cyb_layout.c src/cyb_text.c src/cyb_url.c third_party/tjpgd/tjpgd.c \
-	gate/cy_gate.c gate/cy_wml.c
+	gate/cy_gate.c gate/cy_page.c gate/cy_wml.c
 OBJ = $(SRC:%.c=build/%.o)
 
 all: build/cyb_shot build/test_engine build/test_gate
