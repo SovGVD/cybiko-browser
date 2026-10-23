@@ -1,5 +1,9 @@
 # Cybiko browser
 
+> **Experimental.** Tested only in the Dragonfruit emulator, on a PC and on
+> the JC4827W543 ESP32-S3 board. It has not been tried on a real Cybiko
+> yet.
+
 A small web browser for the emulated Cybiko Xtreme in
 [Dragonfruit](https://github.com/sovgvd/dragonfruit-jc4827w543-esp32), the
 Palm OS and Cybiko emulator for the JC4827W543 ESP32-S3 board.
