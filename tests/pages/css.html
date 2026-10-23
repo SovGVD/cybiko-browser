@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><title>CSS test</title>
+<style>
+/* hidden things */
+.ad, #cookie-banner { display: none }
+.sr-only { position: absolute; width: 1px; height: 1px; clip: rect(0, 0, 0, 0); }
+nav.menu { display:none !important; }
+.shown { display: none; }
+.shown { display: block; }
+@media print { .noprint { display: none } }
+@media (min-width: 800px) { p { display: none } }
+.strong { font-weight: 700 }
+.middle { text-align: center }
+div p .deep { display: none }
+</style>
+<style media="print">.screen { display: none }</style>
+</head><body>
+<div id="cookie-banner">We use cookies <a href="/ok">OK</a></div>
+<nav class="menu"><a href="/a">Menu A</a><a href="/b">Menu B</a></nav>
+<p>One <span class="sr-only">(screen reader)</span>visible line.</p>
+<div class="ad"><div>Nested ad</div> still ad</div>
+<p>After the ad.</p>
+<p class="shown">Shown again.</p>
+<p class="noprint screen">Print rules ignored.</p>
+<p hidden>Hidden attribute.</p>
+<p style="display:none">Inline hidden.</p>
+<p>Some <span class="strong">CSS bold</span> text.</p>
+<div class="middle">Centred by CSS</div>
+<p>Deep <span class="deep">kept</span> too.</p>
+<form action="/f"><input name="q"><input type="text" name="trap" value="x" style="display:none"><input type="submit" value="Go"></form>
+<p>The end.</p>
+</body></html>

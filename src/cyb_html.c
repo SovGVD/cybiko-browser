@@ -78,8 +78,14 @@ typedef struct {
     bool space;                /* a space is due before the next word */
     bool line_start;           /* nothing on the line yet */
     int gap;                   /* 2: a paragraph gap is due, 1: a break */
-    int skip;                  /* inside script, style, ... */
+    int skip;                  /* inside script, style, ..., or a hidden element */
     char skip_tag[12];
+    bool skip_raw;             /* script, style...: no tags inside count */
+    cyb_css_t css;             /* the page's style rules */
+    const char *style_from;    /* where the <style> being read starts */
+    struct { char name[12]; uint8_t fx; } styled[32];  /* open elements styled bold or centred */
+    int n_styled;
+    bool hide_input;           /* the <input> being read is hidden by CSS */
     bool in_title;
     bool in_select;
     bool pre_start;            /* just after <pre>: a new line there is dropped */
@@ -505,7 +511,60 @@ static void indent(builder_t *b, int dir)
 static void skip_until(builder_t *b, const char *name)
 {
     b->skip++;
+    b->skip_raw = true;
     snprintf(b->skip_tag, sizeof b->skip_tag, "%s", name);
+}
+
+static bool is_void(const char *n)
+{
+    static const char *const v[] = { "img", "input", "br", "hr", "meta", "link", "area", "base", "col",
+                                     "embed", "source", "track", "wbr", "param", NULL };
+    for (int i = 0; v[i]; i++)
+        if (!strcmp(n, v[i])) return true;
+    return false;
+}
+
+/* What the page's style does to an element: hidden ones are skipped with
+ * their insides (true), bold and centred ones are kept until they close. */
+static bool styled(builder_t *b, const tag_t *t)
+{
+    const char *n = t->name;
+    if (t->close) {
+        if (b->n_styled && !strcmp(b->styled[b->n_styled - 1].name, n)) {
+            const uint8_t fx = b->styled[--b->n_styled].fx;
+            if ((fx & CSS_BOLD) && b->bold) b->bold--;
+            if ((fx & CSS_CENTER) && b->center) { block(b, 1); b->center--; }
+        }
+        return false;
+    }
+    char cls[256], id[64], style[512];
+    const char *v;
+    size_t vl;
+    uint8_t st = 0;
+    attr_text(b, t, "class", cls, sizeof cls);
+    attr_text(b, t, "id", id, sizeof id);
+    cyb_css_apply(&b->css, n, cls, id, &st);
+    if (attr_text(b, t, "style", style, sizeof style)) {
+        const cyb_css_fx_t fx = cyb_css_decls(style, strlen(style));
+        st = (uint8_t)((st | fx.set) & ~fx.clear);
+    }
+    if (attr(t, "hidden", &v, &vl)) st |= CSS_HIDE;
+    if (st & CSS_HIDE) {
+        if (!strcmp(n, "input")) { b->hide_input = true; return false; }   /* still sent with its form */
+        if (!is_void(n) && !t->self_close) {
+            skip_until(b, n);
+            b->skip_raw = false;
+        }
+        return true;
+    }
+    if ((st & (CSS_BOLD | CSS_CENTER)) && !is_void(n) && !t->self_close &&
+        b->n_styled < (int)(sizeof b->styled / sizeof b->styled[0])) {
+        snprintf(b->styled[b->n_styled].name, sizeof b->styled[0].name, "%s", n);
+        b->styled[b->n_styled++].fx = st & (CSS_BOLD | CSS_CENTER);
+        if (st & CSS_BOLD) b->bold++;
+        if (st & CSS_CENTER) { block(b, 1); b->center++; }
+    }
+    return false;
 }
 
 static void capture_end(builder_t *b)
@@ -571,6 +630,7 @@ static void on_tag(builder_t *b, const tag_t *t)
         if (!t->close && !t->self_close) skip_until(b, n);
         return;
     }
+    if (strcmp(n, "html") && strcmp(n, "head") && styled(b, t)) return;
     if (!strcmp(n, "title")) { b->in_title = !t->close; return; }
     if (!strcmp(n, "base") && !t->close) {
         char url[1024];
@@ -675,6 +735,8 @@ static void on_tag(builder_t *b, const tag_t *t)
     }
     if (!strcmp(n, "input") && !t->close) {
         char type[16];
+        const bool hide = b->hide_input;
+        b->hide_input = false;
         attr_text(b, t, "type", type, sizeof type);
         uint8_t ft = FT_TEXT;
         if (!strcasecmp(type, "hidden")) ft = FT_HIDDEN;
@@ -683,6 +745,7 @@ static void on_tag(builder_t *b, const tag_t *t)
         else if (!strcasecmp(type, "checkbox")) ft = FT_CHECKBOX;
         else if (!strcasecmp(type, "radio")) ft = FT_RADIO;
         else if (!strcasecmp(type, "reset") || !strcasecmp(type, "file")) return;
+        if (hide && ft != FT_SUBMIT) ft = FT_HIDDEN;
         if (ft == FT_SUBMIT && !strcasecmp(type, "button") && b->form < 0) return;
         int f = add_field(b, ft, t);
         if (f < 0) return;
@@ -831,7 +894,7 @@ void cyb_html_parse(cyb_doc_t *d, const char *src, size_t len, const char *base_
         /* a tag starts with < and a letter, / or ! */
         char c = p + 1 < end ? p[1] : 0;
         if (!(isalpha((unsigned char)c) || c == '/' || c == '!' || c == '?')) { p++; continue; }
-        if (b->skip && c != '/') { p++; continue; }
+        if (b->skip && b->skip_raw && c != '/') { p++; continue; }
         if (p > text) on_text(b, text, (size_t)(p - text));
         if (c == '!' && p + 3 < end && p[2] == '-' && p[3] == '-') {
             const char *e = p + 4;
@@ -846,12 +909,24 @@ void cyb_html_parse(cyb_doc_t *d, const char *src, size_t len, const char *base_
         }
         tag_t t;
         const char *after = parse_tag(p + 1, end, &t);
-        if (b->skip && !(t.close && !strcmp(t.name, b->skip_tag))) { p++; text = p - 1; continue; }
+        if (b->skip && b->skip_raw && !(t.close && !strcmp(t.name, b->skip_tag))) { p++; text = p - 1; continue; }
+        if (t.close && !strcmp(t.name, "style") && b->style_from) {
+            cyb_css_parse(&b->css, b->style_from, (size_t)(p - b->style_from));
+            b->style_from = NULL;
+        }
+        const bool was_skipping = b->skip;
         on_tag(b, &t);
+        if (!was_skipping && b->skip && b->skip_raw && !strcmp(t.name, "style")) {
+            /* a style sheet for the screen: its rules are used */
+            char media[64];
+            attr_text(b, &t, "media", media, sizeof media);
+            if (!media[0] || strcasestr(media, "screen") || strcasestr(media, "all")) b->style_from = after;
+        }
         p = text = after;
     }
     if (p > text && text < end) on_text(b, text, (size_t)(end - text));
     if (b->capture) capture_end(b);
+    cyb_css_free(&b->css);
     if (b->refresh[0] && d->n_targets < 3) {
         /* a page that only sends the browser on: its first link */
         uint32_t at = cyb_doc_str(d, b->refresh, strlen(b->refresh));

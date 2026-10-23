@@ -3,7 +3,7 @@
 # library otherwise (add_subdirectory; the PC test tool is built by the
 # Makefile).
 set(CYB_SOURCES
-    src/cy_browser.c src/cyb_cookie.c src/cyb_font.c src/cyb_html.c src/cyb_image.c
+    src/cy_browser.c src/cyb_cookie.c src/cyb_css.c src/cyb_font.c src/cyb_html.c src/cyb_image.c
     src/cyb_layout.c src/cyb_text.c src/cyb_url.c third_party/tjpgd/tjpgd.c
     gate/cy_deflate.c gate/cy_gate.c gate/cy_page.c gate/cy_wml.c)
 

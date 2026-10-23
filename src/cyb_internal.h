@@ -63,6 +63,20 @@ uint32_t cyb_entity(const char *name, int len);
 /* A key with Shift/Fn to the character it types, 0 if none. */
 int cyb_key_char(int key, bool shift, bool fn);
 
+/* ---- style sheets (cyb_css.c) ---- */
+
+enum { CSS_HIDE = 1, CSS_BOLD = 2, CSS_CENTER = 4 };
+typedef struct { uint8_t set, clear; } cyb_css_fx_t;
+typedef struct { char tag[16], cls[40], id[40]; cyb_css_fx_t fx; } cyb_css_rule_t;
+typedef struct { cyb_css_rule_t *r; unsigned n, cap; } cyb_css_t;
+/* Adds the usable rules of a style sheet. */
+void cyb_css_parse(cyb_css_t *c, const char *s, size_t len);
+/* What declarations (a style attribute) do. */
+cyb_css_fx_t cyb_css_decls(const char *s, size_t len);
+/* Applies the rules matching an element to *state (CSS_* bits), in order. */
+void cyb_css_apply(const cyb_css_t *c, const char *tag, const char *cls, const char *id, uint8_t *state);
+void cyb_css_free(cyb_css_t *c);
+
 /* ---- URLs (cyb_url.c) ---- */
 
 /* Resolves href against base into out. False if it is not usable. */

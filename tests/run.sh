@@ -17,6 +17,12 @@ done
 ./build/test_gate -q -p "file://$PWD/tests/pages/images.html"
 ./build/test_gate -q -a -z "file://$PWD/tests/pages/long.html" http://c/y1
 ./build/test_gate -q -p -z "file://$PWD/tests/pages/images.html"
+# CSS: hidden things left out, bold and centred text
+./build/test_gate -a "file://$PWD/tests/pages/css.html" > build/css.txt 2>/dev/null
+! grep -q 'cookies\|Menu\|screen reader\|ad"\|Hidden\|Inline' build/css.txt
+grep -q 's01 t0 "CSS bold' build/css.txt
+grep -q 's10 t0 "Centred by CSS"' build/css.txt
+grep -q '"Deep kept too."' build/css.txt
 # cookies: set on a redirect, sent back, deleted
 python3 tests/cookie_server.py 8765 & server=$!
 sleep 1
