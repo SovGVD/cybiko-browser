@@ -37,7 +37,7 @@ struct target {
 };
 
 #define MAX_TARGETS 256
-#define MAX_BOXES 700
+#define MAX_BOXES 1200              /* gate/cy_page.h CY_PAGE_BOXES */
 
 struct page {
     u8 *data;
@@ -76,6 +76,9 @@ void fb_picture(int x, int y, int w, int h, const u8 *pix);
 void text(int font, int x, int y, const char *s, int len, int c);
 int text_w(int font, const char *s, int len);
 int font_h(int font);
+
+/* inflate.c: raw Deflate src into exactly dstlen bytes; 1 if it worked */
+int inflate(void *dst, u32 dstlen, const void *src, u32 srclen);
 
 /* strings */
 int slen(const char *s);

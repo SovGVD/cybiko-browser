@@ -33,6 +33,11 @@
 
 #define CY_PAGE_MAX 2500       /* a part's size: about 9 s on the radio */
 #define CY_PAGE_PICS_MAX 8000  /* with pictures: about 30 s */
+/* Packed (an application that asks with APP_ZIP), a part goes as "CZ",
+ * u16 its length and its raw Deflate data, and may be this long before: */
+#define CY_PAGE_RAW 8000
+#define CY_PAGE_PICS_RAW 16000
+#define CY_PAGE_BOXES 1200     /* the most boxes in a part */
 
 enum { PB_TEXT, PB_IMG, PB_FIELD, PB_HR, PB_ALT, PB_PIC };
 enum { PT_LINK, PT_FIELD };

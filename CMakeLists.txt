@@ -5,7 +5,7 @@
 set(CYB_SOURCES
     src/cy_browser.c src/cyb_font.c src/cyb_html.c src/cyb_image.c
     src/cyb_layout.c src/cyb_text.c src/cyb_url.c third_party/tjpgd/tjpgd.c
-    gate/cy_gate.c gate/cy_page.c gate/cy_wml.c)
+    gate/cy_deflate.c gate/cy_gate.c gate/cy_page.c gate/cy_wml.c)
 
 if(ESP_PLATFORM)
     idf_component_register(

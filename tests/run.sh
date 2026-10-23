@@ -15,4 +15,6 @@ done
 ./build/test_gate -q -a -w http://c/ "file://$PWD/tests/pages/text.html" "http://c/f3?v0=Bob&v3=2&v5=a" http://c/wifi
 ./build/test_gate -q -a "file://$PWD/tests/pages/long.html" http://c/y1 http://c/y2
 ./build/test_gate -q -p "file://$PWD/tests/pages/images.html"
+./build/test_gate -q -a -z "file://$PWD/tests/pages/long.html" http://c/y1
+./build/test_gate -q -p -z "file://$PWD/tests/pages/images.html"
 echo "pages shown: build/shots"

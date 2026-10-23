@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include "cy_deflate.h"
 #include "cy_page.h"
 #include "cy_wml.h"
 
@@ -45,6 +46,7 @@
 #define APP_GET 0x21
 #define APP_BIG 0x100
 #define APP_PICS 0x200              /* with the part's pictures */
+#define APP_ZIP 0x400               /* it unpacks parts sent packed */
 #define PIC_MAX_W 120               /* the biggest picture sent */
 #define PIC_MAX_H 80
 #define PICS_MAX 6                  /* pictures fetched for a part */
@@ -92,6 +94,7 @@ struct cy_gate {
     bool app;                       /* the Browser application, not WAP */
     bool big;                       /* it wants the bigger font */
     bool pics;                      /* and the pictures */
+    bool zip;                       /* it takes packed parts */
     uint16_t pic[PICS_MAX];         /* the pictures being fetched */
     int n_pics, at_pic;
     uint16_t number;                /* its request number: the next part's */
@@ -566,13 +569,47 @@ static bool type_is(const char *ct, const char *what)
     return ct && !strncasecmp(ct, what, strlen(what));
 }
 
-/* A page laid out for the application, from y = top on. */
+/* The most a part may take on the radio, and the most it may be before
+ * it is packed. */
+static size_t part_cap(const cy_gate_t *g) { return g->pics ? CY_PAGE_PICS_MAX : CY_PAGE_MAX; }
+static size_t raw_cap(const cy_gate_t *g)
+{
+    return !g->zip ? part_cap(g) : g->pics ? CY_PAGE_PICS_RAW : CY_PAGE_RAW;
+}
+
+/* A page laid out for the application, from y = top on. Packed, a part
+ * may hold more: it is laid out again a little shorter until it fits. */
 static void send_layout(cy_gate_t *g, const cyb_doc_t *d, const cyb_layout_t *l, int32_t top)
 {
-    const size_t cap = g->pics ? CY_PAGE_PICS_MAX : CY_PAGE_MAX;
-    uint8_t *w = malloc(cap);
+    const size_t cap = part_cap(g);
+    size_t raw = raw_cap(g);
+    uint8_t *w = malloc(raw);
     if (!w) { finish(g); return; }
     cy_page_links_t k = { g, link_url, form_url, part_url };
+    for (int tries = 0; g->zip && tries < 4; tries++) {
+        int32_t at = top;
+        const size_t len = cy_page_part(d, l, &at, w, raw, &k);
+        uint8_t *z = len ? malloc(len + 64) : NULL;
+        const size_t zl = z ? cy_deflate(w, len, z + 4, len + 60) : 0;
+        if (zl && zl + 4 < len && zl + 4 <= cap) {
+            z[0] = 'C';
+            z[1] = 'Z';
+            z[2] = (uint8_t)(len >> 8);
+            z[3] = (uint8_t)len;
+            logf_(g, "part packed: %u bytes to %u", (unsigned)len, (unsigned)(zl + 4));
+            free(w);
+            answer(g, (char *)z, zl + 4);
+            return;
+        }
+        free(z);
+        if (len && len <= cap && (!zl || zl + 4 >= len)) {
+            answer(g, (char *)w, len);  /* it does not pack */
+            return;
+        }
+        if (!zl || raw <= cap) break;
+        raw = (size_t)((uint64_t)len * cap * 9 / 10 / (zl + 4));
+        if (raw < cap) raw = cap;
+    }
     answer(g, (char *)w, cy_page_part(d, l, &top, w, cap, &k));
 }
 
@@ -588,12 +625,13 @@ static void lay_out(cy_gate_t *g)
  * true if there are any (then they are fetched first, in PICS). */
 static bool want_pics(cy_gate_t *g)
 {
-    uint8_t *tmp = malloc(CY_PAGE_MAX);
+    const size_t cap = raw_cap(g);
+    uint8_t *tmp = malloc(cap);
     if (!tmp) return false;
     /* where the part would end without them */
     int32_t end = g->top;
     cy_page_links_t k = { g, link_url, form_url, part_url };
-    cy_page_part(&g->doc, &g->lay, &end, tmp, CY_PAGE_MAX, &k);
+    cy_page_part(&g->doc, &g->lay, &end, tmp, cap, &k);
     free(tmp);
     g->n_pics = 0;
     for (uint32_t i = cyb_layout_find(&g->lay, g->top); i < g->lay.n && g->n_pics < PICS_MAX; i++) {
@@ -933,7 +971,7 @@ static bool wifi_request(cy_gate_t *g, const char *path)
 /* ---- requests ---- */
 
 static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *url, const char *body,
-                    bool app, bool big, bool pics)
+                    bool app, bool big, bool pics, bool zip)
 {
     if (g->state != IDLE) {
         if (from != g->to) {
@@ -948,6 +986,7 @@ static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *ur
     g->app = app;
     g->big = big;
     g->pics = pics;
+    g->zip = zip;
     logf_(g, "%08x asks for %s%s", (unsigned)from, url, app ? " (Browser)" : "");
     start_fetch(g, url, body);
 }
@@ -1021,7 +1060,8 @@ static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
         if (n + dl > len) dl = len - n;
     }
     if (id != MSG_WAP) {
-        logf_(g, "msg %04x from %08x (flags %02x) not handled", id, (unsigned)from, flags);
+        /* CyOS sends msg 47 to port 93 every 10 s and wants no answer */
+        if (id != 0x47) logf_(g, "msg %04x from %08x (flags %02x) not handled", id, (unsigned)from, flags);
         return;
     }
     const bool app = (p0 & 0xff) == APP_GET;
@@ -1036,7 +1076,8 @@ static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
     char body[128];
     const bool post = (p0 & 0xffff) == WAP_POST && ul + 1 < dl;
     if (post) snprintf(body, sizeof body, "%.*s", (int)(dl - ul - 1), (const char *)m + n + ul + 1);
-    request(g, from, (uint16_t)p1, url, post ? body : NULL, app, app && (p0 & APP_BIG), app && (p0 & APP_PICS));
+    request(g, from, (uint16_t)p1, url, post ? body : NULL, app, app && (p0 & APP_BIG), app && (p0 & APP_PICS),
+            app && (p0 & APP_ZIP));
 }
 
 /* A message too big for one packet comes in parts: byte 10 is the part

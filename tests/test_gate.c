@@ -61,6 +61,8 @@ static void log_line(void *user, const char *line)
     if (!quiet) fprintf(stderr, "gate: %s\n", line);
 }
 
+int inflate(void *dst, unsigned long dstlen, const void *src, unsigned long srclen);
+
 static unsigned g16(const uint8_t *p) { return (unsigned)p[0] << 8 | p[1]; }
 
 /* A part for the application, checked and printed. */
@@ -131,12 +133,13 @@ static void header(uint8_t *p, size_t len, uint32_t to, uint8_t type, uint8_t nu
 int main(int argc, char **argv)
 {
     int a = 1;
-    bool wifi = false, app = false, pics = false;
+    bool wifi = false, app = false, pics = false, zip = false;
     for (; a < argc && argv[a][0] == '-'; a++) {
         if (!strcmp(argv[a], "-q")) quiet = true;
         else if (!strcmp(argv[a], "-a")) app = true;
         else if (!strcmp(argv[a], "-p")) app = pics = true;
         else if (!strcmp(argv[a], "-w")) wifi = true;
+        else if (!strcmp(argv[a], "-z")) zip = true;   /* with -a or -p: packed parts */
     }
     if (a >= argc) { fprintf(stderr, "usage: test_gate [-q] URL\n"); return 2; }
     cyb_net_t net;
@@ -161,7 +164,7 @@ int main(int argc, char **argv)
     size_t ul = strlen(url) + 1, n = 0;
     if (ul > 120 - 16 - 15) { fprintf(stderr, "URL too long for one part\n"); return 2; }
     m[n++] = 0x1c; m[n++] = 0; m[n++] = 0x10; m[n++] = 0x22;
-    put32(m + n, app ? (pics ? 0x221 : 0x21) : 1); n += 4;
+    put32(m + n, app ? (pics ? 0x221 : 0x21) | (zip ? 0x400 : 0) : 1); n += 4;
     put32(m + n, (uint32_t)(11 + 100 * a)); n += 4;
     m[n++] = 0; m[n++] = 0x93;
     m[n++] = (uint8_t)ul;
@@ -210,6 +213,19 @@ int main(int argc, char **argv)
     if (status >= 0) { printf("error %d\n", status); continue; }
     if (!done) { fprintf(stderr, "no page (%u of %u bytes)\n", (unsigned)got, (unsigned)total); return 1; }
     if (got > (pics ? CY_PAGE_PICS_MAX : app ? CY_PAGE_MAX : 5000)) { fprintf(stderr, "page too big: %u\n", (unsigned)got); return 1; }
+    if (app && got >= 4 && !memcmp(page, "CZ", 2)) {
+        /* packed: unpacked the way the application does it */
+        const size_t raw = g16((const uint8_t *)page + 2);
+        char *u = malloc(raw ? raw : 1);
+        if (raw > (pics ? CY_PAGE_PICS_RAW : CY_PAGE_RAW) || !inflate(u, raw, page + 4, got - 4)) {
+            fprintf(stderr, "bad packed part\n");
+            return 1;
+        }
+        if (!quiet) fprintf(stderr, "packed part: %u bytes, %u unpacked\n", (unsigned)got, (unsigned)raw);
+        free(page);
+        page = u;
+        got = raw;
+    }
     if (app) { if (!dump_page((const uint8_t *)page, got)) return 1; }
     else if (!quiet) fwrite(page, 1, got, stdout), putchar('\n');
     free(page);

@@ -154,6 +154,7 @@ typedef struct {
     size_t room;               /* for both together */
     uint16_t doc_target[MAX_TARGETS];
     unsigned n_targets;        /* (target 1 is the next part's link) */
+    unsigned n_boxes;
 } part_t;
 
 /* The part target for page target t, added to the table if new; 0 when
@@ -193,6 +194,8 @@ static int32_t boxes(part_t *pt, const cyb_doc_t *d, const cyb_layout_t *l, int3
             continue;
         }
         if (b->kind == B_TEXT && !(b->style & S_LINK) && blank(d, b)) continue;
+        if (pt->n_boxes == CY_PAGE_BOXES) return cut;
+        pt->n_boxes++;
         box(o, d, b, from, t);
         if (o->over) { *o = keep; return cut; }
         last = b->kind == B_TEXT ? keep.len : 0;
@@ -223,6 +226,7 @@ size_t cy_page_part(const cyb_doc_t *d, const cyb_layout_t *l, int32_t *top, uin
         /* the cut line's boxes that fitted go in the next part instead (the
          * targets stay numbered as they are) */
         *o = head;
+        pt->n_boxes = 0;
         boxes(pt, d, l, from, end, k);
     }
     const bool more = end < l->height;

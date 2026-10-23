@@ -11,6 +11,7 @@
 #define APP_GET 0x21
 #define APP_BIG 0x100
 #define APP_PICS 0x200
+#define APP_ZIP 0x400                /* parts may come packed */
 #define ANS_PART 6
 #define ANS_ERROR 5
 #define MSG_AUTODELETE 0x80000000UL
@@ -155,7 +156,7 @@ static void load(const char *url, u8 push)
     m = cy_Message_new(sizeof(struct Message));
     if (!m) return;
     m->msgid = MSG_WAP;
-    m->param[0] = APP_GET | (big ? APP_BIG : 0) | (with_pics ? APP_PICS : 0);
+    m->param[0] = APP_GET | APP_ZIP | (big ? APP_BIG : 0) | (with_pics ? APP_PICS : 0);
     m->param[1] = next_no;
     cy_Buffer_ctor(&send_buf, len, 16);
     cy_Buffer_store(&send_buf, want, 0, len);
@@ -180,6 +181,16 @@ static void loaded(void)
     rx = 0;
     loading = 0;
     status[0] = 0;
+    if (len >= 4 && data[0] == 'C' && data[1] == 'Z') {
+        /* packed: "CZ", u16 the length, raw Deflate */
+        u16 raw = (u16)(data[2] << 8 | data[3]);
+        u8 *u = cy_malloc(raw ? raw : 1);
+        if (!u) { cy_free(data); say("Out of memory"); return; }
+        if (!inflate(u, raw, data + 4, len - 4)) { cy_free(u); cy_free(data); say("Bad page from the gate"); return; }
+        cy_free(data);
+        data = u;
+        len = raw;
+    }
     if (!page_set(data, len)) { page_free(); say("Bad page from the gate"); return; }
     top = 0;
     focus = 0;
