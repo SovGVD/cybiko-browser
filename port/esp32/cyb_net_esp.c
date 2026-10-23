@@ -195,6 +195,8 @@ typedef struct req {
     char type[128];               /* of the answer */
     char location[1024];
     char error[160];
+    cyb_jar_t *jar;               /* the asking Cybiko's cookies, or NULL */
+    const char *hop;              /* the URL being fetched (redirects too) */
 } req_t;
 
 static QueueHandle_t work;
@@ -217,6 +219,7 @@ static esp_err_t on_http(esp_http_client_event_t *e)
     if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key && e->header_value) {
         if (!strcasecmp(e->header_key, "Content-Type")) snprintf(r->type, sizeof r->type, "%s", e->header_value);
         else if (!strcasecmp(e->header_key, "Location")) snprintf(r->location, sizeof r->location, "%s", e->header_value);
+        else if (!strcasecmp(e->header_key, "Set-Cookie") && r->jar && r->hop) cyb_jar_set(r->jar, r->hop, e->header_value);
     }
     return ESP_OK;
 }
@@ -246,6 +249,12 @@ static void fetch(req_t *r)
         esp_http_client_handle_t c = esp_http_client_init(&cfg);
         if (!c) { fail(r, "%s", "Bad address"); break; }
         esp_http_client_set_method(c, post ? HTTP_METHOD_POST : HTTP_METHOD_GET);
+        r->hop = url;
+        if (r->jar) {
+            char *cookie = malloc(4096);
+            if (cookie && cyb_jar_header(r->jar, url, cookie, 4096)) esp_http_client_set_header(c, "Cookie", cookie);
+            free(cookie);
+        }
         esp_http_client_set_header(c, "Accept", "text/html, text/plain, image/gif, image/png, image/jpeg, */*;q=0.5");
         esp_http_client_set_header(c, "Accept-Encoding", "identity");
         if (post) esp_http_client_set_header(c, "Content-Type", r->content_type[0] ? r->content_type : "application/x-www-form-urlencoded");
@@ -342,7 +351,7 @@ static void net_close(void *user)
     current = NULL;
 }
 
-static bool net_open(void *user, const char *url, const char *body, const char *content_type)
+static bool net_open(void *user, const char *url, const char *body, const char *content_type, cyb_jar_t *jar)
 {
     net_close(user);
     if (!start()) return false;
@@ -356,6 +365,7 @@ static bool net_open(void *user, const char *url, const char *body, const char *
     }
     snprintf(r->url, sizeof r->url, "%s", url);
     if (content_type) snprintf(r->content_type, sizeof r->content_type, "%s", content_type);
+    r->jar = jar;
     r->refs = 2;               /* the browser's and the worker's */
     if (xQueueSend(work, &r, 0) != pdTRUE) {
         r->refs = 1;

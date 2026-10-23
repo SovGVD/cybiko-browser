@@ -17,4 +17,13 @@ done
 ./build/test_gate -q -p "file://$PWD/tests/pages/images.html"
 ./build/test_gate -q -a -z "file://$PWD/tests/pages/long.html" http://c/y1
 ./build/test_gate -q -p -z "file://$PWD/tests/pages/images.html"
+# cookies: set on a redirect, sent back, deleted
+python3 tests/cookie_server.py 8765 & server=$!
+sleep 1
+u=http://127.0.0.1:8765
+./build/test_gate -a $u/login $u/logout $u/home http://c/cookies http://c/cookies?clear $u/home > build/cookies.txt 2>/dev/null || { kill $server; exit 1; }
+kill $server
+grep -q '"cookies: session=abc123; theme=dark"' build/cookies.txt
+grep -q '"cookies: theme=dark"' build/cookies.txt
+grep -q '"cookies: none"' build/cookies.txt
 echo "pages shown: build/shots"

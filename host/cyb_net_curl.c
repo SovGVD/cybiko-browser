@@ -1,12 +1,14 @@
 /* The browser's network on a PC, through the curl program. A request runs
  * to its end in open() (so it blocks: fine for tests and the PC emulators),
- * and read() then hands out the saved body. */
+ * and read() then hands out the saved body. Redirects are followed here,
+ * one curl run each, so that each step gets and sets its cookies. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "cyb_net_curl.h"
@@ -28,13 +30,34 @@ static void curl_close(void *user)
     c->body = NULL;
 }
 
-static bool curl_open(void *user, const char *url, const char *body, const char *content_type)
+#define REDIRECTS 6
+
+/* The Set-Cookie headers of the last answer in a curl -D dump. */
+static void take_cookies(FILE *headers, const char *url, cyb_jar_t *jar)
 {
-    curl_t *c = user;
-    curl_close(c);
-    c->final_url[0] = c->content_type[0] = c->error[0] = 0;
-    FILE *out = tmpfile(), *info = tmpfile(), *post = NULL;
-    if (!out || !info) { snprintf(c->error, sizeof c->error, "No temporary files"); goto fail; }
+    char line[8192];
+    rewind(headers);
+    while (fgets(line, sizeof line, headers)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!strncasecmp(line, "Set-Cookie:", 11)) cyb_jar_set(jar, url, line + 11);
+    }
+}
+
+/* One request, without following a redirect: true with c->body set, or a
+ * redirect's target in next. */
+static bool one(curl_t *c, const char *url, const char *body, const char *content_type, cyb_jar_t *jar,
+                char *next, size_t next_cap, int *code)
+{
+    next[0] = 0;
+    *code = 0;
+    FILE *out = tmpfile(), *info = tmpfile(), *post = NULL, *headers = tmpfile();
+    if (!out || !info || !headers) { snprintf(c->error, sizeof c->error, "No temporary files"); goto fail; }
+    char cookie[4200] = "", headers_arg[32];
+    snprintf(headers_arg, sizeof headers_arg, "/dev/fd/%d", fileno(headers));
+    if (jar) {
+        memcpy(cookie, "Cookie: ", 8);
+        if (!cyb_jar_header(jar, url, cookie + 8, sizeof cookie - 8)) cookie[0] = 0;
+    }
     char ctype[160] = "", post_arg[64] = "";
     if (body) {
         post = tmpfile();
@@ -53,7 +76,13 @@ static bool curl_open(void *user, const char *url, const char *body, const char 
         const char *argv[24];
         int n = 0;
         argv[n++] = "curl";
-        argv[n++] = "-sSL";
+        argv[n++] = "-sS";
+        argv[n++] = "-D";
+        argv[n++] = headers_arg;
+        if (cookie[0]) {
+            argv[n++] = "-H";
+            argv[n++] = cookie;
+        }
         argv[n++] = "--compressed";
         argv[n++] = "--max-time";
         argv[n++] = "40";
@@ -62,7 +91,7 @@ static bool curl_open(void *user, const char *url, const char *body, const char 
         argv[n++] = "-A";
         argv[n++] = c->agent;
         argv[n++] = "-w";
-        argv[n++] = "\n@@cyb@@%{url_effective}\n%{content_type}\n%{http_code}\n";
+        argv[n++] = "\n@@cyb@@%{url_effective}\n%{content_type}\n%{http_code}\n%{redirect_url}\n";
         if (body) {
             argv[n++] = "-H";
             argv[n++] = ctype;
@@ -78,6 +107,10 @@ static bool curl_open(void *user, const char *url, const char *body, const char 
     int status;
     waitpid(pid, &status, 0);
     if (post) fclose(post);
+    fflush(headers);
+    if (jar) take_cookies(headers, url, jar);
+    fclose(headers);
+    headers = NULL;
     /* -w goes to stdout after the body: split it off */
     fflush(out);
     long len = ftell(out);
@@ -106,10 +139,21 @@ static bool curl_open(void *user, const char *url, const char *body, const char 
     char *u = mark + 8, *t = strchr(u, '\n');
     if (t) {
         *t++ = 0;
-        char *code = strchr(t, '\n');
-        if (code) *code++ = 0;
+        char *code_s = strchr(t, '\n');
+        if (code_s) *code_s++ = 0;
         snprintf(c->content_type, sizeof c->content_type, "%s", t);
-        int http = code ? atoi(code) : 0;
+        int http = code_s ? atoi(code_s) : 0;
+        *code = http;
+        char *to = code_s ? strchr(code_s, '\n') : NULL;
+        if (to) {
+            to++;
+            to[strcspn(to, "\n")] = 0;
+            if (http >= 300 && http < 400 && *to) {
+                snprintf(next, next_cap, "%s", to);
+                fclose(out);
+                return false;
+            }
+        }
         if (http >= 400 && http != 404 && body_len == 0) {
             snprintf(c->error, sizeof c->error, "The server said %d", http);
             goto fail;
@@ -123,7 +167,26 @@ static bool curl_open(void *user, const char *url, const char *body, const char 
 fail:
     if (out) fclose(out);
     if (info) fclose(info);
+    if (headers) fclose(headers);
     if (!c->error[0]) snprintf(c->error, sizeof c->error, "Failed");
+    return false;
+}
+
+static bool curl_open(void *user, const char *url, const char *body, const char *content_type, cyb_jar_t *jar)
+{
+    curl_t *c = user;
+    curl_close(c);
+    c->final_url[0] = c->content_type[0] = c->error[0] = 0;
+    char at[1024], next[1024];
+    snprintf(at, sizeof at, "%s", url);
+    for (int hop = 0; hop <= REDIRECTS; hop++) {
+        int code;
+        if (one(c, at, body, content_type, jar, next, sizeof next, &code)) return true;
+        if (!next[0]) return false;
+        snprintf(at, sizeof at, "%s", next);
+        if (code != 307 && code != 308) body = NULL;
+    }
+    snprintf(c->error, sizeof c->error, "Too many redirects");
     return false;
 }
 

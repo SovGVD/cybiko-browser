@@ -504,7 +504,7 @@ static void next_image(cyb_t *b)
     for (; b->img < b->doc.n_imgs; b->img++) {
         cyb_img_t *im = &b->doc.imgs[b->img];
         if (im->state != IMG_WAIT) continue;
-        if (!b->net.open(b->net.user, b->doc.pool + im->src, NULL, NULL)) {
+        if (!b->net.open(b->net.user, b->doc.pool + im->src, NULL, NULL, NULL)) {
             im->state = IMG_FAILED;
             continue;
         }
@@ -565,7 +565,7 @@ static void go(cyb_t *b, const char *url, bool push, const char *body)
     }
     if (!strncasecmp(url, "https:", 6) || !strncasecmp(url, "http:", 5) || !strncasecmp(url, "file:", 5) ||
         !strncasecmp(url, "gopher:", 7)) {
-        if (!b->net.open(b->net.user, url, body, body ? "application/x-www-form-urlencoded" : NULL)) {
+        if (!b->net.open(b->net.user, url, body, body ? "application/x-www-form-urlencoded" : NULL, NULL)) {
             error_page(b, url, b->net.error ? b->net.error(b->net.user) : NULL);
             return;
         }

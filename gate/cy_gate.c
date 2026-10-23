@@ -73,11 +73,13 @@ static const char home_html[] =
     "<a href=\"http://text.npr.org/\">NPR Text</a><br>"
     "<a href=\"http://wiby.me/\">Wiby search</a><br>"
     "<a href=\"http://wttr.in/?T0\">Weather</a><br>"
-    "<a href=\"http://c/wifi\">Wi-Fi setup</a><br>";
+    "<a href=\"http://c/wifi\">Wi-Fi setup</a><br>"
+    "<a href=\"http://c/cookies\">Cookies</a><br>";
 
 enum { IDLE, FETCH, SEND, WIFI, PICS };
 
 #define WIFI_SCAN_MS 8000           /* longest wait for a scan */
+#define JARS 8                      /* Cybikos whose cookies are kept */
 
 struct cy_gate {
     uint32_t id;
@@ -131,6 +133,10 @@ struct cy_gate {
     /* the Wi-Fi page waits for a scan or for joining a network */
     uint32_t wifi_until;
     char wifi_note[96];
+
+    /* each Cybiko's cookies */
+    struct { uint32_t id, used; cyb_jar_t *jar; } jars[JARS];
+    uint32_t jar_clock;
 
     char home[256];
 
@@ -498,6 +504,27 @@ static bool no_networks(cy_gate_t *g)
 
 static bool own_page(cy_gate_t *g, const char *url);
 
+/* The cookies of the Cybiko being answered; the one not heard from for
+ * the longest loses its own when a new one comes. */
+static cyb_jar_t *jar(cy_gate_t *g)
+{
+    int k = 0;
+    for (int i = 0; i < JARS; i++) {
+        if (g->jars[i].jar && g->jars[i].id == g->to) { k = i; goto found; }
+        if (g->jars[i].used < g->jars[k].used) k = i;
+    }
+    if (g->jars[k].jar) {
+        logf_(g, "cookies of %08x dropped for %08x", (unsigned)g->jars[k].id, (unsigned)g->to);
+        cyb_jar_clear(g->jars[k].jar);
+    } else if (!(g->jars[k].jar = cyb_jar_create())) {
+        return NULL;
+    }
+    g->jars[k].id = g->to;
+found:
+    g->jars[k].used = ++g->jar_clock;
+    return g->jars[k].jar;
+}
+
 /* Fetches url from the web, or answers with one of the gate's own pages. */
 static void start_fetch(cy_gate_t *g, const char *url, const char *body)
 {
@@ -508,7 +535,7 @@ static void start_fetch(cy_gate_t *g, const char *url, const char *body)
     g->start = (cy_wml_pos_t){ 0, 0 };
     g->top = 0;
     logf_(g, "fetch %s%s", url, body ? " (post)" : "");
-    if (!g->net.open || !g->net.open(g->net.user, url, body, body ? "application/x-www-form-urlencoded" : NULL)) {
+    if (!g->net.open || !g->net.open(g->net.user, url, body, body ? "application/x-www-form-urlencoded" : NULL, jar(g))) {
         const char *why = g->net.error ? g->net.error(g->net.user) : NULL;
         if (offline_wifi(g, why && *why ? why : "Not online.")) return;
         answer_text(g, "Error", why && *why ? why : "No connection to the Internet.");
@@ -780,7 +807,7 @@ next:
     while (++g->at_pic < g->n_pics) {
         cyb_img_t *im = &g->doc.imgs[g->pic[g->at_pic]];
         g->buf_len = 0;
-        if (g->net.open && g->net.open(g->net.user, g->doc.pool + im->src, NULL, NULL)) {
+        if (g->net.open && g->net.open(g->net.user, g->doc.pool + im->src, NULL, NULL, jar(g))) {
             im->state = IMG_LOADING;
             g->fetch_until = g->now + PIC_MS;
             return;
@@ -1002,6 +1029,22 @@ static bool own_page(cy_gate_t *g, const char *url)
     if (strncasecmp(url, ALIAS_HOST, strlen(ALIAS_HOST))) return false;
     const char *p = url + strlen(ALIAS_HOST);
     if (wifi_request(g, p)) return true;
+    if (!strncasecmp(p, "cookies", 7) && (!p[7] || p[7] == '?')) {
+        /* the asking Cybiko's cookies: how many, and a way to drop them */
+        cyb_jar_t *j = jar(g);
+        if (p[7] == '?') {
+            logf_(g, "cookies of %08x cleared (%u)", (unsigned)g->to, cyb_jar_count(j));
+            cyb_jar_clear(j);
+        }
+        char html[400];
+        snprintf(html, sizeof html,
+                 "<title>Cookies</title><b>Cookies</b><br>The gate keeps %u cookie%s for this Cybiko, "
+                 "until it restarts.<br><a href=\"http://c/cookies?clear\">Clear them</a><br>"
+                 "<a href=\"http://c/\">Home</a>",
+                 cyb_jar_count(j), cyb_jar_count(j) == 1 ? "" : "s");
+        show_html(g, html, ALIAS_HOST);
+        return true;
+    }
     char kind = (*p == 'f' || *p == 'p' || *p == 'y') ? *p++ : 'u';
     const char *query = strchr(p, '?');
     const char *a = alias_get(g, (uint32_t)strtoul(p, NULL, 10));
@@ -1241,6 +1284,7 @@ void cy_gate_destroy(cy_gate_t *g)
     cyb_layout_free(&g->lay);
     cyb_fonts_free(g->fonts);
     for (int i = 0; i < ALIASES; i++) free(g->alias[i]);
+    for (int i = 0; i < JARS; i++) cyb_jar_free(g->jars[i].jar);
     free(g->buf);
     free(g);
 }

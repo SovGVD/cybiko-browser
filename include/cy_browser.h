@@ -31,13 +31,26 @@ typedef struct {
     bool open;          /* no password */
 } cyb_ap_t;
 
+/* Cookies, a jar for each Cybiko (src/cyb_cookie.c). The host's network
+ * calls cyb_jar_header for each request it makes (redirects too) and
+ * cyb_jar_set for each Set-Cookie header it gets. */
+typedef struct cyb_jar cyb_jar_t;
+cyb_jar_t *cyb_jar_create(void);
+void cyb_jar_free(cyb_jar_t *j);
+void cyb_jar_clear(cyb_jar_t *j);
+unsigned cyb_jar_count(const cyb_jar_t *j);
+/* Takes a Set-Cookie header's value got from url. */
+void cyb_jar_set(cyb_jar_t *j, const char *url, const char *header);
+/* The Cookie header's value for a request to url ("" for none). */
+size_t cyb_jar_header(const cyb_jar_t *j, const char *url, char *out, size_t cap);
+
 /* The host's network. One request at a time. Every function may be called
  * often, so none should block for long. */
 typedef struct {
     void *user;
-    /* Start a GET, or a POST when body is not NULL. False if it cannot start
-     * (error() says why). */
-    bool (*open)(void *user, const char *url, const char *body, const char *content_type);
+    /* Start a GET, or a POST when body is not NULL, with the cookies of jar
+     * (NULL: none). False if it cannot start (error() says why). */
+    bool (*open)(void *user, const char *url, const char *body, const char *content_type, cyb_jar_t *jar);
     /* Up to cap bytes of the response body: a count, 0 when nothing has come
      * yet, CYB_EOF at the end or CYB_FAIL. */
     int (*read)(void *user, uint8_t *buf, int cap);
