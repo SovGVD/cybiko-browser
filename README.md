@@ -20,6 +20,12 @@ the part again with them, which takes about half a minute over the radio. Script
 sheets are not run, so the sites made for old or small screens (FrogFind,
 68k.news, text-only news sites) work best.
 
+![Browser on the emulated Cybiko](docs/images/browser.png)
+
+*Browser in the emulator. Top row: the gate's home page, a test page, and
+typing into the search field. Bottom row: a form with a list open, then a
+page before and after **Load pictures**.*
+
 ## How it works
 
 The gate does the web and the Cybiko only draws. Browser sends the URL to
@@ -46,6 +52,8 @@ it would work on a real Xtreme too, given a gate it can hear.
 The whole protocol as the Cybiko sees it (radio packets, gate discovery,
 messages, both browsers' requests and the page format) is in
 [docs/cywig-spec.md](docs/cywig-spec.md).
+
+![The Xtreme WAP browser through the gate](docs/images/wap.png)
 
 The Xtreme came with its own WAP browser, which fetched pages through a
 Cybiko Wireless Internet Gate: a Cybiko Classic on a PC's serial port that
