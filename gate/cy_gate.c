@@ -1061,7 +1061,8 @@ static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
     }
     if (id != MSG_WAP) {
         /* CyOS sends msg 47 to port 93 every 10 s and wants no answer */
-        if (id != 0x47) logf_(g, "msg %04x from %08x (flags %02x) not handled", id, (unsigned)from, flags);
+        logf_(g, "msg %04x from %08x (flags %02x) not handled%s", id, (unsigned)from, flags,
+              id == 0x47 ? " (CyOS's gate check, needs no answer)" : "");
         return;
     }
     const bool app = (p0 & 0xff) == APP_GET;
