@@ -756,7 +756,8 @@ static void wifi_page(cy_gate_t *g)
     free(w);
 }
 
-/* Asks for the password of network a (a short URL's number). */
+/* Asks for the password of network a (a short URL's number), in a plain
+ * text field: on the Cybiko's keys it is easier to see what was typed. */
 static void wifi_ask(cy_gate_t *g, uint32_t a, const char *ssid)
 {
     char w[800], e[200], url[32];
@@ -764,7 +765,7 @@ static void wifi_ask(cy_gate_t *g, uint32_t a, const char *ssid)
     snprintf(url, sizeof url, ALIAS_HOST "j%u", (unsigned)a);
     snprintf(w, sizeof w,
              "<title>Wi-Fi</title><b>%s</b><br><form action=\"%s\">Password (empty if open):<br>"
-             "<input name=\"p\" type=\"password\" size=\"14\"><br><input type=\"submit\" value=\"Join\"></form>"
+             "<input name=\"p\" size=\"14\"><br><input type=\"submit\" value=\"Join\"></form>"
              "<a href=\"" ALIAS_HOST "wifi\">Back</a>", e, url);
     show_html(g, w, url);
 }
