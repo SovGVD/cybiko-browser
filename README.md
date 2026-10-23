@@ -43,6 +43,10 @@ it would work on a real Xtreme too, given a gate it can hear.
 
 ## The WAP gate (CyWIG)
 
+The whole protocol as the Cybiko sees it (radio packets, gate discovery,
+messages, both browsers' requests and the page format) is in
+[docs/cywig-spec.md](docs/cywig-spec.md).
+
 The Xtreme came with its own WAP browser, which fetched pages through a
 Cybiko Wireless Internet Gate: a Cybiko Classic on a PC's serial port that
 ran a gateway firmware, with the VCyWIG program on the PC doing the
