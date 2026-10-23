@@ -11,7 +11,7 @@
  *
  * x and y place the picture in the character cell and x + w is the advance.
  * The archive format and its compression are in
- * docs/cybiko-mp3-cartridge.md (4.2). */
+ * file-formats.md of cybiko-docs (https://github.com/SovGVD/cybiko-docs). */
 #include <stdlib.h>
 #include <string.h>
 #include "cyb_internal.h"
