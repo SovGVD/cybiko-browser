@@ -64,11 +64,17 @@ static int dist_code(unsigned dist)
 /* Huffman code lengths of at most maxbits for freq[0..n): the frequencies
  * are halved until the tree is shallow enough. At least two symbols get a
  * code, so the code is complete. */
-static void lengths(const uint32_t *freq_in, int n, int maxbits, uint8_t *len)
-{
+typedef struct {                /* lengths()'s work space, kept off the stack */
     uint32_t freq[288], w[2 * 288];
     int16_t parent[2 * 288];
     int live[2 * 288];
+} tree_t;
+
+static void lengths(tree_t *t, const uint32_t *freq_in, int n, int maxbits, uint8_t *len)
+{
+    uint32_t *freq = t->freq, *w = t->w;
+    int16_t *parent = t->parent;
+    int *live = t->live;
     memcpy(freq, freq_in, n * sizeof *freq);
     int used = 0;
     for (int i = 0; i < n; i++) used += freq[i] != 0;
@@ -156,7 +162,8 @@ size_t cy_deflate(const uint8_t *in, size_t n, uint8_t *out, size_t cap)
     int32_t *head = malloc(sizeof *head << HASH_BITS);
     int32_t *prev = malloc(sizeof *prev * (n ? n : 1));
     sym_t *syms = malloc(sizeof *syms * (n + 1));
-    if (!head || !prev || !syms) { free(head); free(prev); free(syms); return 0; }
+    tree_t *tree = malloc(sizeof *tree);
+    if (!head || !prev || !syms || !tree) { free(head); free(prev); free(syms); free(tree); return 0; }
     for (int i = 0; i < 1 << HASH_BITS; i++) head[i] = -1;
 
     /* LZ77 */
@@ -193,8 +200,8 @@ size_t cy_deflate(const uint8_t *in, size_t n, uint8_t *out, size_t cap)
     /* the codes */
     uint8_t ll[286 + 30];
     uint16_t lcode[286], dcode[30];
-    lengths(lfreq, 286, 15, ll);
-    lengths(dfreq, 30, 15, ll + 286);
+    lengths(tree, lfreq, 286, 15, ll);
+    lengths(tree, dfreq, 30, 15, ll + 286);
     int hlit = 286, hdist = 30;
     while (hlit > 257 && !ll[hlit - 1]) hlit--;
     while (hdist > 1 && !ll[286 + hdist - 1]) hdist--;
@@ -228,7 +235,7 @@ size_t cy_deflate(const uint8_t *in, size_t n, uint8_t *out, size_t cap)
     for (int k = 0; k < nr; k++) cfreq[rle[k]]++;
     uint8_t cl[19];
     uint16_t ccode[19];
-    lengths(cfreq, 19, 7, cl);
+    lengths(tree, cfreq, 19, 7, cl);
     codes(cl, 19, ccode);
     int hclen = 19;
     while (hclen > 4 && !cl[order[hclen - 1]]) hclen--;
@@ -263,5 +270,6 @@ size_t cy_deflate(const uint8_t *in, size_t n, uint8_t *out, size_t cap)
     free(head);
     free(prev);
     free(syms);
+    free(tree);
     return b.over ? 0 : b.len;
 }
