@@ -439,14 +439,38 @@ static bool query_value(const char *q, const char *var, char *out, size_t cap)
 
 /* ---- fetching ---- */
 
+static void wifi_page(cy_gate_t *g);
+
+/* No way online: no network saved yet, or Wi-Fi not connected after a
+ * failed fetch. Then the Wi-Fi page is shown instead, with why. */
+static bool offline_wifi(cy_gate_t *g, const char *why)
+{
+    if (!g->net.wifi_status) return false;
+    char st[8];
+    if (g->net.wifi_status(g->net.user, st, sizeof st) > 0) return false;
+    if (g->net.wifi_scan) g->net.wifi_scan(g->net.user, NULL, 0);     /* fresh list */
+    snprintf(g->wifi_note, sizeof g->wifi_note, "%s", why);
+    g->state = WIFI;
+    g->wifi_until = g->now + WIFI_SCAN_MS;
+    return true;
+}
+
+static bool no_networks(cy_gate_t *g)
+{
+    char names[1][33];
+    return g->net.wifi_saved && g->net.wifi_saved(g->net.user, names, 1) == 0;
+}
+
 static void start_fetch(cy_gate_t *g, const char *url, const char *body)
 {
+    if (no_networks(g) && offline_wifi(g, "No Wi-Fi network yet: pick one.")) return;
     snprintf(g->url, sizeof g->url, "%s", url);
     g->buf_len = 0;
     g->start = (cy_wml_pos_t){ 0, 0 };
     logf_(g, "fetch %s%s", url, body ? " (post)" : "");
     if (!g->net.open || !g->net.open(g->net.user, url, body, body ? "application/x-www-form-urlencoded" : NULL)) {
         const char *why = g->net.error ? g->net.error(g->net.user) : NULL;
+        if (offline_wifi(g, why && *why ? why : "Not online.")) return;
         answer_text(g, "Error", why && *why ? why : "No connection to the Internet.");
         return;
     }
@@ -574,6 +598,7 @@ static void fetch_step(cy_gate_t *g)
             g->net.close(g->net.user);
             g->state = IDLE;
             logf_(g, "fetch failed: %s", why ? why : "?");
+            if (offline_wifi(g, why && *why ? why : "Not online.")) return;
             answer_text(g, "Error", why && *why ? why : "The page could not be fetched.");
             return;
         }
@@ -746,7 +771,7 @@ static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *ur
     logf_(g, "%08x asks for %s", (unsigned)from, url);
     if (!strcasecmp(url, HOME_URL) || !strcasecmp(url, "http://www.cybiko.com/") || !strcasecmp(url, "http://c/")) {
         if (g->home[0]) start_fetch(g, g->home, NULL);
-        else answer_static(g, home_wml);
+        else if (!(no_networks(g) && offline_wifi(g, "No Wi-Fi network yet: pick one."))) answer_static(g, home_wml);
         return;
     }
     if (!strncasecmp(url, ALIAS_HOST, strlen(ALIAS_HOST))) {

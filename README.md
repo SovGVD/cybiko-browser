@@ -50,7 +50,8 @@ sites, or `wap.home` from `cybiko.cfg`. Its **Wi-Fi setup** link
 (`http://c/wifi`) shows the networks around and the saved ones: pick one,
 type its password and the gate joins it for the next page; Forget drops a
 saved one. The list is the one the Palm OS Wi-Fi gateway uses (ESP32 NVS),
-so a network saved in either mode works in both.
+so a network saved in either mode works in both. When the gate has no network saved,
+or can't get online, it answers with this page instead (and says why).
 
 A page comes in at about 275 bytes a second (a full 5000-byte deck in about
 18 s), since every 87-byte part goes over the emulated radio and waits for
