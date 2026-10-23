@@ -12,7 +12,7 @@
 #define LINE_STEP 10
 
 /* the page format (gate/cy_page.h) */
-enum { PB_TEXT, PB_IMG, PB_FIELD, PB_HR, PB_ALT, PB_MORE };
+enum { PB_TEXT, PB_IMG, PB_FIELD, PB_HR, PB_ALT, PB_PIC, PB_MORE = 15 };
 enum { PT_LINK, PT_FIELD };
 enum { FT_TEXT, FT_PASSWORD, FT_HIDDEN, FT_SUBMIT, FT_CHECKBOX, FT_RADIO, FT_SELECT, FT_TEXTAREA, FT_RESET };
 #define S_LINK 8
@@ -24,6 +24,7 @@ struct box {
     u8 kind, font, x, w, h, style, target, len;
     long y;
     const char *text;
+    const u8 *pix;                  /* PB_PIC: h rows of (w + 3) / 4 bytes */
 };
 
 struct target {
@@ -71,6 +72,7 @@ extern u8 *fb;
 void fb_fill(int x, int y, int w, int h, int c);
 void fb_invert(int x, int y, int w, int h);
 void fb_frame(int x, int y, int w, int h, int c);
+void fb_picture(int x, int y, int w, int h, const u8 *pix);
 void text(int font, int x, int y, const char *s, int len, int c);
 int text_w(int font, const char *s, int len);
 int font_h(int font);

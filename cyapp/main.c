@@ -10,10 +10,12 @@
 #define GATE_PORT 0x93
 #define APP_GET 0x21
 #define APP_BIG 0x100
+#define APP_PICS 0x200
 #define ANS_PART 6
 #define ANS_ERROR 5
 #define MSG_AUTODELETE 0x80000000UL
 #define LOAD_MS 70000L              /* no answer: give up */
+#define PICS_MS 120000L             /* with pictures (fetched first) */
 #define URL_MAX 200
 #define HISTORY 12
 #define HOME "http://c/"
@@ -34,6 +36,8 @@ static int hist_n, hist_pos = -1;
 /* loading */
 static u8 loading;
 static u8 push_when_done;
+static u8 with_pics;                /* this load asks for the pictures */
+static u8 pics_next;                /* the next one will */
 static char want[URL_MAX];          /* the URL asked for */
 static u16 next_no = 1, expect;     /* request numbers */
 static u8 *rx;
@@ -144,12 +148,14 @@ static void load(const char *url, u8 push)
     u32 len = (u32)slen(url) + 1;
     stop_loading();
     message[0] = 0;
+    with_pics = pics_next;
+    pics_next = 0;
     if (!gate) { say("No gate nearby"); return; }
     if (url != want) scpy(want, url, sizeof want);
     m = cy_Message_new(sizeof(struct Message));
     if (!m) return;
     m->msgid = MSG_WAP;
-    m->param[0] = APP_GET | (big ? APP_BIG : 0);
+    m->param[0] = APP_GET | (big ? APP_BIG : 0) | (with_pics ? APP_PICS : 0);
     m->param[1] = next_no;
     cy_Buffer_ctor(&send_buf, len, 16);
     cy_Buffer_store(&send_buf, want, 0, len);
@@ -159,7 +165,7 @@ static void load(const char *url, u8 push)
     loading = 1;
     push_when_done = push;
     waited = 0;
-    scpy(status, "Asking...", sizeof status);
+    scpy(status, with_pics ? "Pictures..." : "Asking...", sizeof status);
 }
 
 static void remember_place(void)
@@ -387,6 +393,7 @@ static void menu(void)
     list_items[list_n++] = "Home";
     list_items[list_n++] = "Wi-Fi setup";
     list_items[list_n++] = "Reload";
+    list_items[list_n++] = "Load pictures";
     list_items[list_n++] = "Back";
     list_items[list_n++] = big ? "Smaller text" : "Bigger text";
     list_items[list_n++] = "Exit";
@@ -400,10 +407,11 @@ static u8 menu_choose(u8 i)
     case 0: edit_start(0, hist_pos >= 0 ? hist[hist_pos].url : ""); break;
     case 1: go(HOME); break;
     case 2: go(WIFI); break;
-    case 3: if (hist_pos >= 0) load(hist[hist_pos].url, 2); break;
-    case 4: history_go(-1); break;
-    case 5: big = !big; if (hist_pos >= 0) load(hist[hist_pos].url, 2); break;
-    case 6: return 1;
+    case 3: if (hist_pos >= 0) { remember_place(); load(hist[hist_pos].url, 2); } break;
+    case 4: if (hist_pos >= 0) { remember_place(); pics_next = 1; load(hist[hist_pos].url, 2); } break;
+    case 5: history_go(-1); break;
+    case 6: big = !big; if (hist_pos >= 0) load(hist[hist_pos].url, 2); break;
+    case 7: return 1;
     }
     return 0;
 }
@@ -505,7 +513,7 @@ static void run(struct Process *p)
         struct Message *m = cy_Queue_get_message(PROCESS_QUEUE(p), 500, 0, 0x7fff);
         u8 quit = 0;
         if (!m) {
-            if (loading && (waited += 500) > LOAD_MS) { stop_loading(); say("The gate did not answer"); paint(); }
+            if (loading && (waited += 500) > (with_pics && !rx ? PICS_MS : LOAD_MS)) { stop_loading(); say("The gate did not answer"); paint(); }
             else if (loading && !rx && waited == 3000 && !cy_get_gate_cyid()) { stop_loading(); say("No gate nearby"); paint(); }
             continue;
         }

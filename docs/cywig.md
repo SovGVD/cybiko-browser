@@ -100,7 +100,7 @@ says "No connection" if not.
 ## The Browser app
 
 The Browser app (`cyapp/`) asks the gate the same way, with p0 = 0x21
-(0x121 for the bigger font). The gate answers with msg 1022 messages to the
+(+0x100 for the bigger font, +0x200 for the pictures of the part). The gate answers with msg 1022 messages to the
 process `Browser`, numbered as above, and the page laid out for the
 Cybiko's screen instead of WML: boxes of text in one of CyOS's four fonts
 at their places, form fields, rules and picture frames, then a table of

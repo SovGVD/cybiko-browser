@@ -44,6 +44,11 @@
  * (cy_page.h) in messages to its process, numbered as the WAP browser's. */
 #define APP_GET 0x21
 #define APP_BIG 0x100
+#define APP_PICS 0x200              /* with the part's pictures */
+#define PIC_MAX_W 120               /* the biggest picture sent */
+#define PIC_MAX_H 80
+#define PICS_MAX 6                  /* pictures fetched for a part */
+#define PIC_MS 15000                /* the longest a picture may take */
 #define APP_PROCESS "Browser"
 
 #define BEACON_MS 3000
@@ -68,7 +73,7 @@ static const char home_html[] =
     "<a href=\"http://wttr.in/?T0\">Weather</a><br>"
     "<a href=\"http://c/wifi\">Wi-Fi setup</a><br>";
 
-enum { IDLE, FETCH, SEND, WIFI };
+enum { IDLE, FETCH, SEND, WIFI, PICS };
 
 #define WIFI_SCAN_MS 8000           /* longest wait for a scan */
 
@@ -86,6 +91,9 @@ struct cy_gate {
     uint32_t to;                    /* the Cybiko asking */
     bool app;                       /* the Browser application, not WAP */
     bool big;                       /* it wants the bigger font */
+    bool pics;                      /* and the pictures */
+    uint16_t pic[PICS_MAX];         /* the pictures being fetched */
+    int n_pics, at_pic;
     uint16_t number;                /* its request number: the next part's */
     char url[1024];
     uint32_t fetch_until;
@@ -313,7 +321,7 @@ static void tx_again(cy_gate_t *g)
 
 static void finish(cy_gate_t *g)
 {
-    if (g->state == FETCH) g->net.close(g->net.user);
+    if (g->state == FETCH || g->state == PICS) g->net.close(g->net.user);
     g->state = IDLE;
     g->tx_busy = false;
     free(g->wml);
@@ -341,7 +349,7 @@ static void answer(cy_gate_t *g, char *wml, size_t len)
 {
     free(g->wml);
     g->wml = wml;
-    g->wml_len = len > CY_WML_MAX ? CY_WML_MAX : len;
+    g->wml_len = len > CY_WML_MAX && !g->app ? CY_WML_MAX : len;
     g->wml_sent = 0;
     g->error = false;
     g->state = SEND;
@@ -561,20 +569,55 @@ static bool type_is(const char *ct, const char *what)
 /* A page laid out for the application, from y = top on. */
 static void send_layout(cy_gate_t *g, const cyb_doc_t *d, const cyb_layout_t *l, int32_t top)
 {
-    uint8_t *w = malloc(CY_PAGE_MAX);
+    const size_t cap = g->pics ? CY_PAGE_PICS_MAX : CY_PAGE_MAX;
+    uint8_t *w = malloc(cap);
     if (!w) { finish(g); return; }
     cy_page_links_t k = { g, link_url, form_url, part_url };
-    answer(g, (char *)w, cy_page_part(d, l, &top, w, CY_PAGE_MAX, &k));
+    answer(g, (char *)w, cy_page_part(d, l, &top, w, cap, &k));
+}
+
+static void lay_out(cy_gate_t *g)
+{
+    if (g->lay_ok && g->lay_big == g->big) return;
+    cyb_layout(&g->lay, &g->doc, g->fonts, g->big);
+    g->lay_ok = true;
+    g->lay_big = g->big;
+}
+
+/* The pictures of the part from g->top on that are still to be fetched:
+ * true if there are any (then they are fetched first, in PICS). */
+static bool want_pics(cy_gate_t *g)
+{
+    uint8_t *tmp = malloc(CY_PAGE_MAX);
+    if (!tmp) return false;
+    /* where the part would end without them */
+    int32_t end = g->top;
+    cy_page_links_t k = { g, link_url, form_url, part_url };
+    cy_page_part(&g->doc, &g->lay, &end, tmp, CY_PAGE_MAX, &k);
+    free(tmp);
+    g->n_pics = 0;
+    for (uint32_t i = cyb_layout_find(&g->lay, g->top); i < g->lay.n && g->n_pics < PICS_MAX; i++) {
+        const cyb_box_t *b = &g->lay.boxes[i];
+        if (b->y >= end && end < g->lay.height) break;
+        if ((b->kind != B_IMG && b->kind != B_ALT) || b->ref < 0 || (uint32_t)b->ref >= g->doc.n_imgs) continue;
+        if (g->doc.imgs[b->ref].state != IMG_WAIT) continue;
+        bool dup = false;
+        for (int j = 0; j < g->n_pics; j++) dup |= g->pic[j] == (uint16_t)b->ref;
+        if (!dup) g->pic[g->n_pics++] = (uint16_t)b->ref;
+    }
+    g->at_pic = -1;
+    return g->n_pics > 0;
 }
 
 /* The page from g->start (g->top) on, as WML (or laid out). */
 static void send_doc(cy_gate_t *g)
 {
     if (g->app) {
-        if (!g->lay_ok || g->lay_big != g->big) {
-            cyb_layout(&g->lay, &g->doc, g->fonts, g->big);
-            g->lay_ok = true;
-            g->lay_big = g->big;
+        lay_out(g);
+        if (g->pics && want_pics(g)) {
+            g->state = PICS;
+            logf_(g, "fetching %d pictures", g->n_pics);
+            return;
         }
         send_layout(g, &g->doc, &g->lay, g->top);
         return;
@@ -655,6 +698,63 @@ static void fetched(cy_gate_t *g)
     send_doc(g);
 }
 
+/* The pictures for the application: one after another, scaled to at most
+ * PIC_MAX_W x PIC_MAX_H, then the part with them. */
+static void pic_done(cy_gate_t *g, bool ok)
+{
+    g->net.close(g->net.user);
+    cyb_img_t *im = &g->doc.imgs[g->pic[g->at_pic]];
+    im->state = IMG_FAILED;
+    if (ok) {
+        int max_w = PIC_MAX_W, max_h = PIC_MAX_H;
+        if (im->want_w && im->want_w < max_w) max_w = im->want_w;
+        if (im->want_w && im->want_h) {
+            int h = im->want_h * max_w / im->want_w;
+            if (h > 0 && h < max_h) max_h = h;
+        }
+        if (cyb_image_decode(g->buf, g->buf_len, max_w, max_h, &im->pic)) im->state = IMG_DONE;
+    }
+    logf_(g, "picture %s: %s", g->doc.pool + im->src, im->state == IMG_DONE ? "ok" : "failed");
+    g->buf_len = 0;
+}
+
+static void pics_step(cy_gate_t *g)
+{
+    if (g->at_pic >= 0) {
+        for (int k = 0; k < 16; k++) {
+            if (g->buf_len + 4096 + 1 > g->buf_cap) {
+                size_t cap = g->buf_cap ? g->buf_cap * 2 : 32768;
+                uint8_t *p = cap <= CYB_IMG_MAX_BYTES ? realloc(g->buf, cap + 1) : NULL;
+                if (!p) { pic_done(g, false); goto next; }
+                g->buf = p;
+                g->buf_cap = cap;
+            }
+            int n = g->net.read(g->net.user, g->buf + g->buf_len, 4096);
+            if (n == CYB_EOF) { pic_done(g, true); goto next; }
+            if (n == CYB_FAIL) { pic_done(g, false); goto next; }
+            if (n <= 0) break;
+            g->buf_len += (size_t)n;
+        }
+        if ((int32_t)(g->now - g->fetch_until) >= 0) pic_done(g, false);
+        else return;
+    }
+next:
+    while (++g->at_pic < g->n_pics) {
+        cyb_img_t *im = &g->doc.imgs[g->pic[g->at_pic]];
+        g->buf_len = 0;
+        if (g->net.open && g->net.open(g->net.user, g->doc.pool + im->src, NULL, NULL)) {
+            im->state = IMG_LOADING;
+            g->fetch_until = g->now + PIC_MS;
+            return;
+        }
+        im->state = IMG_FAILED;
+    }
+    g->state = IDLE;
+    g->lay_ok = false;
+    lay_out(g);
+    send_layout(g, &g->doc, &g->lay, g->top);
+}
+
 static void fetch_step(cy_gate_t *g)
 {
     for (int k = 0; k < 16; k++) {
@@ -672,7 +772,7 @@ static void fetch_step(cy_gate_t *g)
             const char *why = g->net.error ? g->net.error(g->net.user) : NULL;
             g->net.close(g->net.user);
             g->state = IDLE;
-            logf_(g, "fetch failed: %s", why ? why : "?");
+            logf_(g, "fetch failed: %s: %s", g->url, why ? why : "?");
             if (offline_wifi(g, why && *why ? why : "Not online.")) return;
             answer_text(g, "Error", why && *why ? why : "The page could not be fetched.");
             return;
@@ -833,7 +933,7 @@ static bool wifi_request(cy_gate_t *g, const char *path)
 /* ---- requests ---- */
 
 static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *url, const char *body,
-                    bool app, bool big)
+                    bool app, bool big, bool pics)
 {
     if (g->state != IDLE) {
         if (from != g->to) {
@@ -847,6 +947,7 @@ static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *ur
     g->number = number;
     g->app = app;
     g->big = big;
+    g->pics = pics;
     logf_(g, "%08x asks for %s%s", (unsigned)from, url, app ? " (Browser)" : "");
     start_fetch(g, url, body);
 }
@@ -935,7 +1036,7 @@ static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
     char body[128];
     const bool post = (p0 & 0xffff) == WAP_POST && ul + 1 < dl;
     if (post) snprintf(body, sizeof body, "%.*s", (int)(dl - ul - 1), (const char *)m + n + ul + 1);
-    request(g, from, (uint16_t)p1, url, post ? body : NULL, app, app && (p0 & APP_BIG));
+    request(g, from, (uint16_t)p1, url, post ? body : NULL, app, app && (p0 & APP_BIG), app && (p0 & APP_PICS));
 }
 
 /* A message too big for one packet comes in parts: byte 10 is the part
@@ -1032,6 +1133,7 @@ uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
         beacon(g);
     }
     if (g->state == FETCH) fetch_step(g);
+    if (g->state == PICS) pics_step(g);
     if (g->state == WIFI) wifi_step(g);
     if (g->tx_busy && (int32_t)(now_ms - g->tx_at) >= 0) {
         if (g->tries >= TRIES) {
@@ -1041,7 +1143,7 @@ uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
             tx_again(g);
         }
     }
-    if (g->state == FETCH) return 5;
+    if (g->state == FETCH || g->state == PICS) return 5;
     if (g->state == WIFI) return 100;
     uint32_t wait = g->next_beacon - now_ms;
     if (g->tx_busy && g->tx_at - now_ms < wait) wait = g->tx_at - now_ms;
@@ -1062,6 +1164,14 @@ void cy_gate_set_home(cy_gate_t *g, const char *url)
 
 void cy_gate_cancel(cy_gate_t *g)
 {
+    if (g->state == PICS) {         /* the part without the rest of its pictures */
+        if (g->at_pic >= 0 && g->at_pic < g->n_pics) g->net.close(g->net.user);
+        g->state = IDLE;
+        g->lay_ok = false;
+        lay_out(g);
+        send_layout(g, &g->doc, &g->lay, g->top);
+        return;
+    }
     if (g->state != FETCH) return;
     g->net.close(g->net.user);
     g->state = IDLE;

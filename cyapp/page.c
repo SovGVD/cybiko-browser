@@ -86,6 +86,7 @@ u8 page_set(u8 *data, u16 len)
         pg.box[pg.n_boxes++] = at;
         at += 8;
         if (kind == PB_TEXT || kind == PB_ALT) at += 1 + data[at];
+        else if (kind == PB_PIC) at += (u16)((data[at - 4] + 3) / 4) * data[at - 3];
     }
     if (!targets(data + table, data + len)) return 0;
     if (pg.more) pg.height += 16;
@@ -120,6 +121,7 @@ void page_box(u16 i, struct box *b)
         b->target = p[7];
         b->len = 0;
         b->text = "";
+        b->pix = p + 8;
         if (b->kind == PB_TEXT || b->kind == PB_ALT) {
             b->len = p[8];
             b->text = (const char *)p + 9;
@@ -231,6 +233,9 @@ void page_draw(void)
             break;
         case PB_ALT:
             text(0, x, y, b.text, b.len, b.target ? BLACK : DARK);
+            break;
+        case PB_PIC:
+            fb_picture(x, y, b.w, b.h, b.pix);
             break;
         case PB_IMG:
             fb_frame(x, y, b.w, b.h, LIGHT);

@@ -13,7 +13,9 @@
  *   8   u8 n, n bytes     the title
  *       boxes up to the target table, each:
  *         u8 kind << 4 | font, u8 x, u16 y, u8 w, u8 h, u8 style, u8 target
- *         (kind PB_TEXT and PB_ALT: then u8 n and n bytes of text)
+ *         (kind PB_TEXT and PB_ALT: then u8 n and n bytes of text;
+ *         PB_PIC, a picture: then h rows of (w + 3) / 4 bytes, 2 bits a
+ *         pixel, the leftmost in the top bits, 0 white to 3 black)
  *       target table: u8 count, then each target (numbered from 1):
  *         PT_LINK   u8 n, URL
  *         PT_FIELD  u8 type (FT_*), u8 form, u8 flags (1 checked),
@@ -30,8 +32,9 @@
 #include "cyb_internal.h"
 
 #define CY_PAGE_MAX 2500       /* a part's size: about 9 s on the radio */
+#define CY_PAGE_PICS_MAX 8000  /* with pictures: about 30 s */
 
-enum { PB_TEXT, PB_IMG, PB_FIELD, PB_HR, PB_ALT };
+enum { PB_TEXT, PB_IMG, PB_FIELD, PB_HR, PB_ALT, PB_PIC };
 enum { PT_LINK, PT_FIELD };
 
 typedef struct {

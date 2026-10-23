@@ -110,7 +110,11 @@ static void box(out_t *o, const cyb_doc_t *d, const cyb_box_t *b, int32_t top, u
     static const uint8_t kinds[] = { [B_TEXT] = PB_TEXT, [B_IMG] = PB_IMG, [B_FIELD] = PB_FIELD,
                                      [B_HR] = PB_HR, [B_ALT] = PB_ALT };
     int x = b->x < 0 ? 0 : b->x > 255 ? 255 : b->x;
-    u8(o, (unsigned)kinds[b->kind] << 4 | (b->kind == B_ALT ? F_SMALL : b->font));
+    const cyb_pic_t *pic = NULL;
+    if (b->kind == B_IMG && b->ref >= 0 && (uint32_t)b->ref < d->n_imgs && d->imgs[b->ref].state == IMG_DONE &&
+        d->imgs[b->ref].pic.pix && d->imgs[b->ref].pic.w == b->w && d->imgs[b->ref].pic.h == b->h && b->w <= 255)
+        pic = &d->imgs[b->ref].pic;
+    u8(o, (unsigned)(pic ? PB_PIC : kinds[b->kind]) << 4 | (b->kind == B_ALT ? F_SMALL : b->font));
     u8(o, (unsigned)x);
     u16(o, (unsigned)(b->y - top));
     u8(o, b->w > 255 ? 255 : b->w);
@@ -118,6 +122,7 @@ static void box(out_t *o, const cyb_doc_t *d, const cyb_box_t *b, int32_t top, u
     u8(o, b->style);
     u8(o, t);
     if (b->kind == B_TEXT || b->kind == B_ALT) box_text(o, d, b);
+    if (pic) put(o, pic->pix, (size_t)(pic->w + 3) / 4 * pic->h);
 }
 
 static bool blank(const cyb_doc_t *d, const cyb_box_t *b)

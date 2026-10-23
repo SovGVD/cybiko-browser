@@ -59,6 +59,26 @@ void fb_frame(int x, int y, int w, int h, int c)
     fb_fill(x + w - 1, y, 1, h, c);
 }
 
+/* A 2-bit picture, clipped to the view (below the title bar). */
+void fb_picture(int x, int y, int w, int h, const u8 *pix)
+{
+    int stride = (w + 3) / 4, j, i;
+    for (j = 0; j < h; j++) {
+        int yy = y + j;
+        const u8 *row = pix + j * stride;
+        u8 *out;
+        if (yy < BAR_H || yy >= SCR_H) continue;
+        out = fb + yy * (SCR_W / 4);
+        for (i = 0; i < w; i++) {
+            int xx = x + i, c, sh;
+            if (xx < 0 || xx >= SCR_W - SCROLL_W) continue;
+            c = (row[i >> 2] >> (6 - 2 * (i & 3))) & 3;
+            sh = 6 - 2 * (xx & 3);
+            out[xx >> 2] = (u8)((out[xx >> 2] & ~(3 << sh)) | (c << sh));
+        }
+    }
+}
+
 void text(int font, int x, int y, const char *s, int len, int c)
 {
     if (len <= 0 || y >= SCR_H || y <= -16) return;

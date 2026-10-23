@@ -13,7 +13,10 @@ WAP browser uses the same gate.
 It shows plain HTML pages on the Cybiko's 160x100 screen: text in CyOS's
 own fonts with bold and headings, lists, links, preformatted text, rules
 and forms (text, password, check boxes, radio buttons, lists, GET and
-POST). Pictures are shown as frames or their `alt` text. Scripts and style
+POST). Pictures are shown as frames or their `alt` text until **Load
+pictures** in the menu: then the gate fetches the pictures of the part on
+screen (at most six, each scaled to at most 120x80 in four grays) and sends
+the part again with them, which takes about half a minute over the radio. Scripts and style
 sheets are not run, so the sites made for old or small screens (FrogFind,
 68k.news, text-only news sites) work best.
 
@@ -74,7 +77,7 @@ and the WAP browser, is in [docs/cywig.md](docs/cywig.md).
 | Enter | open the link, edit the field, tick the box, pick from the list (on nothing: the menu) |
 | Del | back |
 | Esc | stop loading, back, or close on the first page |
-| Help | menu: address, home, Wi-Fi setup, reload, back, text size, exit |
+| Help | menu: address, home, Wi-Fi setup, reload, load pictures, back, text size, exit |
 | a letter | opens the address line: a web address, or words to search with FrogFind |
 
 In a text field or the address line Enter keeps it, Esc cancels and Del

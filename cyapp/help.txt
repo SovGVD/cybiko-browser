@@ -7,5 +7,5 @@ Left/Right: page up and down
 Enter: open the link, change the field (on nothing: the menu)
 Del: back
 Esc: stop loading, back, or close
-Help: menu (address, home, Wi-Fi, reload, text size, exit)
+Help: menu (address, home, Wi-Fi, reload, pictures, text size, exit)
 Typing a letter: go to an address, or search the words

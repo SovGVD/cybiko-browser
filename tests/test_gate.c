@@ -4,7 +4,8 @@
  *   test_gate [-q] [-w] [-a] URL...   -q: check the parts only, print nothing;
  *                                    -w: a pretend Wi-Fi (for http://c/wifi);
  *                                    -a: ask as the Browser application and
- *                                        print its pages' boxes (cy_page.h)
+ *                                        print its pages' boxes (cy_page.h);
+ *                                    -p: the same, with the pictures
  *
  * The URLs are asked for one after another from the same gate, so later
  * ones can be the gate's short URLs from earlier pages (http://c/...). */
@@ -80,8 +81,10 @@ static bool dump_page(const uint8_t *p, size_t len)
             if (!quiet) printf(" \"%.*s\"", p[at], p + at + 1);
             at += 1 + p[at];
         }
+        if (kind == PB_PIC) at += (size_t)(b[4] + 3) / 4 * b[5];
         if (!quiet) putchar('\n');
     }
+    if (at != table) { fprintf(stderr, "boxes run past the table\n"); return false; }
     unsigned n = p[at++];
     for (unsigned t = 1; t <= n; t++) {
         if (at >= len) { fprintf(stderr, "cut target table\n"); return false; }
@@ -128,10 +131,11 @@ static void header(uint8_t *p, size_t len, uint32_t to, uint8_t type, uint8_t nu
 int main(int argc, char **argv)
 {
     int a = 1;
-    bool wifi = false, app = false;
+    bool wifi = false, app = false, pics = false;
     for (; a < argc && argv[a][0] == '-'; a++) {
         if (!strcmp(argv[a], "-q")) quiet = true;
         else if (!strcmp(argv[a], "-a")) app = true;
+        else if (!strcmp(argv[a], "-p")) app = pics = true;
         else if (!strcmp(argv[a], "-w")) wifi = true;
     }
     if (a >= argc) { fprintf(stderr, "usage: test_gate [-q] URL\n"); return 2; }
@@ -157,7 +161,7 @@ int main(int argc, char **argv)
     size_t ul = strlen(url) + 1, n = 0;
     if (ul > 120 - 16 - 15) { fprintf(stderr, "URL too long for one part\n"); return 2; }
     m[n++] = 0x1c; m[n++] = 0; m[n++] = 0x10; m[n++] = 0x22;
-    put32(m + n, app ? 0x21 : 1); n += 4;
+    put32(m + n, app ? (pics ? 0x221 : 0x21) : 1); n += 4;
     put32(m + n, (uint32_t)(11 + 100 * a)); n += 4;
     m[n++] = 0; m[n++] = 0x93;
     m[n++] = (uint8_t)ul;
@@ -205,7 +209,7 @@ int main(int argc, char **argv)
     }
     if (status >= 0) { printf("error %d\n", status); continue; }
     if (!done) { fprintf(stderr, "no page (%u of %u bytes)\n", (unsigned)got, (unsigned)total); return 1; }
-    if (got > (app ? CY_PAGE_MAX : 5000)) { fprintf(stderr, "page too big: %u\n", (unsigned)got); return 1; }
+    if (got > (pics ? CY_PAGE_PICS_MAX : app ? CY_PAGE_MAX : 5000)) { fprintf(stderr, "page too big: %u\n", (unsigned)got); return 1; }
     if (app) { if (!dump_page((const uint8_t *)page, got)) return 1; }
     else if (!quiet) fwrite(page, 1, got, stdout), putchar('\n');
     free(page);
