@@ -426,10 +426,10 @@ index 0000000..d7fbdf8
 +}
 diff --git a/src/components/cybiko_app/cybiko_gate.c b/src/components/cybiko_app/cybiko_gate.c
 new file mode 100644
-index 0000000..7acec4e
+index 0000000..ff8ef5e
 --- /dev/null
 +++ b/src/components/cybiko_app/cybiko_gate.c
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,119 @@
 +/* The CyWIG on the board (see cybiko_gate.h). */
 +#include <string.h>
 +#include "cybiko_gate.h"
@@ -534,6 +534,7 @@ index 0000000..7acec4e
 +void cybiko_gate_poll(cybiko_t *m)
 +{
 +    if (!to_machine) return;
++    cyb_net_esp_save();     /* networks set on the gate's Wi-Fi page (needs this internal stack) */
 +    packet_t p;
 +    while (xQueuePeek(to_machine, &p, 0) == pdTRUE) {
 +        if (!cybiko_rf_receive(m, p.data, p.len, p.channel)) break;    /* full: next time */
