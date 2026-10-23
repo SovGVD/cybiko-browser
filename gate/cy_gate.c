@@ -80,6 +80,16 @@ enum { IDLE, FETCH, SEND, WIFI, PICS };
 
 #define WIFI_SCAN_MS 8000           /* longest wait for a scan */
 #define JARS 8                      /* Cybikos whose cookies are kept */
+#define WAITING 4                   /* requests from other Cybikos kept while busy */
+
+typedef struct {
+    bool used;
+    uint32_t from;
+    uint16_t number;
+    bool app, big, pics, zip, post;
+    char url[1024];
+    char body[128];
+} waiting_t;
 
 struct cy_gate {
     uint32_t id;
@@ -133,6 +143,9 @@ struct cy_gate {
     /* the Wi-Fi page waits for a scan or for joining a network */
     uint32_t wifi_until;
     char wifi_note[96];
+
+    /* requests that came while another Cybiko was being answered, oldest first */
+    waiting_t waiting[WAITING];
 
     /* each Cybiko's cookies */
     struct { uint32_t id, used; cyb_jar_t *jar; } jars[JARS];
@@ -1002,8 +1015,32 @@ static void request(cy_gate_t *g, uint32_t from, uint16_t number, const char *ur
 {
     if (g->state != IDLE) {
         if (from != g->to) {
-            /* one at a time: the other Cybiko tries again */
-            logf_(g, "busy: %08x asked for %s", (unsigned)from, url);
+            /* one at a time: the other Cybiko's waits its turn (its newest
+             * request replaces one it made before) */
+            int k = -1;
+            for (int i = 0; i < WAITING; i++)
+                if (g->waiting[i].used && g->waiting[i].from == from) { k = i; break; }
+            for (int i = 0; k < 0 && i < WAITING; i++)
+                if (!g->waiting[i].used) k = i;
+            if (k < 0) {
+                logf_(g, "busy and %d waiting already: %08x's request for %s dropped (it will time out)",
+                      WAITING, (unsigned)from, url);
+                return;
+            }
+            if (g->waiting[k].used) {
+                /* keep the order: out, then in at the end */
+                memmove(&g->waiting[k], &g->waiting[k + 1], (size_t)(WAITING - 1 - k) * sizeof g->waiting[0]);
+                g->waiting[WAITING - 1].used = false;
+                for (k = 0; g->waiting[k].used; k++) ;
+                logf_(g, "busy: %08x's new request for %s replaces its waiting one", (unsigned)from, url);
+            } else {
+                logf_(g, "busy with %08x: %08x's request for %s waits", (unsigned)g->to, (unsigned)from, url);
+            }
+            waiting_t *w = &g->waiting[k];
+            *w = (waiting_t){ .used = true, .from = from, .number = number, .app = app, .big = big,
+                              .pics = pics, .zip = zip, .post = body != NULL };
+            snprintf(w->url, sizeof w->url, "%s", url);
+            if (body) snprintf(w->body, sizeof w->body, "%s", body);
             return;
         }
         finish(g);
@@ -1213,6 +1250,13 @@ void cy_gate_rf_in(cy_gate_t *g, const uint8_t *pkt, size_t len, uint8_t ch)
 uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
 {
     g->now = now_ms;
+    if (g->state == IDLE && g->waiting[0].used) {
+        waiting_t w = g->waiting[0];
+        memmove(&g->waiting[0], &g->waiting[1], (WAITING - 1) * sizeof g->waiting[0]);
+        g->waiting[WAITING - 1].used = false;
+        logf_(g, "now %08x's waiting request", (unsigned)w.from);
+        request(g, w.from, w.number, w.url, w.post ? w.body : NULL, w.app, w.big, w.pics, w.zip);
+    }
     if ((int32_t)(now_ms - g->next_beacon) >= 0) {
         g->next_beacon = now_ms + BEACON_MS;
         beacon(g);

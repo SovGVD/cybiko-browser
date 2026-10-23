@@ -17,6 +17,8 @@ done
 ./build/test_gate -q -p "file://$PWD/tests/pages/images.html"
 ./build/test_gate -q -a -z "file://$PWD/tests/pages/long.html" http://c/y1
 ./build/test_gate -q -p -z "file://$PWD/tests/pages/images.html"
+# a second Cybiko asking while the gate is busy waits its turn
+./build/test_gate -q -a -2 "file://$PWD/tests/pages/text.html"
 # CSS: hidden things left out, bold and centred text
 ./build/test_gate -a "file://$PWD/tests/pages/css.html" > build/css.txt 2>/dev/null
 ! grep -q 'cookies\|Menu\|screen reader\|ad"\|Hidden\|Inline' build/css.txt

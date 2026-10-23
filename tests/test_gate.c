@@ -18,6 +18,9 @@
 
 #define GATE 0x4c80c0deu
 #define CYBIKO 0x4c000001u
+#define OTHER 0x4c000002u          /* -2: another Cybiko that asks first and never answers */
+
+static uint32_t me = CYBIKO;
 
 static uint8_t q[64][200];
 static size_t q_len[64];
@@ -124,7 +127,7 @@ static void header(uint8_t *p, size_t len, uint32_t to, uint8_t type, uint8_t nu
 {
     memset(p, 0, len);
     put32(p, to);
-    put32(p + 4, CYBIKO);
+    put32(p + 4, me);
     p[8] = 0xc2;
     p[9] = type;
     p[11] = number;
@@ -133,13 +136,14 @@ static void header(uint8_t *p, size_t len, uint32_t to, uint8_t type, uint8_t nu
 int main(int argc, char **argv)
 {
     int a = 1;
-    bool wifi = false, app = false, pics = false, zip = false;
+    bool wifi = false, app = false, pics = false, zip = false, other = false;
     for (; a < argc && argv[a][0] == '-'; a++) {
         if (!strcmp(argv[a], "-q")) quiet = true;
         else if (!strcmp(argv[a], "-a")) app = true;
         else if (!strcmp(argv[a], "-p")) app = pics = true;
         else if (!strcmp(argv[a], "-w")) wifi = true;
         else if (!strcmp(argv[a], "-z")) zip = true;   /* with -a or -p: packed parts */
+        else if (!strcmp(argv[a], "-2")) other = true;
     }
     if (a >= argc) { fprintf(stderr, "usage: test_gate [-q] URL\n"); return 2; }
     cyb_net_t net;
@@ -170,6 +174,15 @@ int main(int argc, char **argv)
     m[n++] = (uint8_t)ul;
     memcpy(m + n, url, ul);
     cy_gate_seal(pkt, 200);
+    if (other) {
+        /* the other Cybiko's request comes first: ours has to wait for it */
+        uint8_t o[200];
+        memcpy(o, pkt, 200);
+        put32(o + 4, OTHER);
+        o[11] = 7;
+        cy_gate_seal(o, 200);
+        cy_gate_rf_in(g, o, 200, 2);
+    }
     cy_gate_rf_in(g, pkt, 200, 2);
 
     char *page = calloc(1, 65536);

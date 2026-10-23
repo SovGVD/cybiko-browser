@@ -547,6 +547,11 @@ gave them out, and only for a while (the gate keeps the last 512).
 | `http://c/xN` | forget saved network N |
 | `http://c/cookies`, `?clear` | how many cookies the gate keeps for this Cybiko, and dropping them |
 
+The gate answers one Cybiko at a time. A request from another Cybiko
+while it is busy waits its turn (up to 4 of them, a newer request from the
+same Cybiko replacing its older one), so it can take longer than usual;
+the Browser app gives up after 70 s (120 s with pictures).
+
 The gate keeps the web's cookies for each Cybiko by its ID (for up to 8
 Cybikos, until the gate restarts), so a Cybiko stays logged in to a site
 across requests, both browsers alike.
