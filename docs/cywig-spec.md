@@ -396,7 +396,7 @@ Request: msg 1022 to port 93 of the gate, data = the URL, NUL-ended.
 
 | Field | Value |
 | --- | --- |
-| p0 | `21`, plus `100` for the bigger fonts, plus `200` for the pictures of the part |
+| p0 | `21`, plus `100` for the bigger fonts, plus `200` for the pictures of the part, plus `400` if the app unpacks packed parts |
 | p1 | the request number |
 
 The request number must be past every number the last answer used (the
@@ -406,6 +406,15 @@ Answer: msg 1022 messages to process `Browser`, framed exactly as for WAP:
 p0 = `number << 16 | 6`, p1 = `total << 16 | part size`, the parts in
 order, numbered from the request's number. The total is at most 2500 bytes
 (8000 with pictures). Errors come as pages, not as p0 = 5.
+
+Packed parts: when p0 has `400`, the gate may send a part packed. Then
+what comes in is `43 5a` ("CZ"), a 16-bit length, and the part in raw
+Deflate (RFC 1951, no zlib header), which unpacks to exactly that many
+bytes of the page format (section 13). A part is packed only when that
+makes it smaller, so either form can come. Packed, a part may unpack to
+up to 8000 bytes (16000 with pictures) and up to 1200 boxes, and still
+takes at most the 2500 (8000) bytes above on the radio; text pages pack
+to about a third.
 
 The pages are laid out by the gate for the Cybiko's screen (section 13):
 the app doesn't parse HTML or measure text. A long page comes in parts,
@@ -536,8 +545,13 @@ gave them out, and only for a while (the gate keeps the last 512).
 | `http://c/wifi`, `?scan` | the gate's Wi-Fi page, and with a new scan |
 | `http://c/jN[?p=password]` | join network N (without `p`: ask for the password) |
 | `http://c/xN` | forget saved network N |
+| `http://c/cookies`, `?clear` | how many cookies the gate keeps for this Cybiko, and dropping them |
 
-An expired one answers with a page saying so. When the gate has no Internet
+The gate keeps the web's cookies for each Cybiko by its ID (for up to 8
+Cybikos, until the gate restarts), so a Cybiko stays logged in to a site
+across requests, both browsers alike.
+
+An expired short URL answers with a page saying so. When the gate has no Internet
 it answers any request with its Wi-Fi page instead, with the reason on top.
 
 ## 15. Timing and throughput
@@ -550,6 +564,7 @@ it answers any request with its Wi-Fi page instead, with the reason on top.
 | page data through the radio | about 240-275 bytes a second |
 | a full 5000-byte WAP deck | about 18-20 s |
 | a 2500-byte Browser part | about 9-10 s |
+| the same packed: about 8000 bytes of text page | about 9-10 s |
 | an 8000-byte Browser part with pictures | about 30-40 s, plus the time to fetch them |
 | CyOS's msg 47 to the gate | every 10 s |
 | gate beacons | every 3 s is enough |

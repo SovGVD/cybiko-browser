@@ -20,9 +20,18 @@ and forms (text, password, check boxes, radio buttons, lists, GET and
 POST). Pictures are shown as frames or their `alt` text until **Load
 pictures** in the menu: then the gate fetches the pictures of the part on
 screen (at most six, each scaled to at most 120x80 in four grays) and sends
-the part again with them, which takes about half a minute over the radio. Scripts and style
-sheets are not run, so the sites made for old or small screens (FrogFind,
-68k.news, text-only news sites) work best.
+the part again with them, which takes about half a minute over the radio.
+
+The gate packs each part with Deflate before it goes over the radio and
+the app unpacks it, so a part of about 9 seconds carries some 8 KB of page
+instead of 2.5 KB. It keeps each Cybiko's cookies (through redirects too),
+so sites with a login work; the **Cookies** page on the gate's home page
+clears them. It reads the simple parts of a page's style sheets: what is
+hidden (`display:none`, `visibility:hidden`, the `hidden` attribute,
+text meant only for screen readers) is left out, and bold and centred text
+is shown so. JavaScript is not run, linked style sheets are not fetched and
+`@media` rules are skipped, so the sites made for old or small screens
+(FrogFind, 68k.news, text-only news sites) work best.
 
 ![Browser on the emulated Cybiko](docs/images/browser.png)
 
@@ -111,12 +120,12 @@ both.
 | Path | What |
 | --- | --- |
 | `include/cy_browser.h` | the engine's API: create, key, step, draw |
-| `src/` | the engine the gate uses: HTML parser, layout, fonts, text, URLs, pictures; and `cy_browser.c`, an earlier browser drawn by the ESP32 (used by `cyb_shot`) |
+| `src/` | the engine the gate uses: HTML parser, CSS, cookies, layout, fonts, text, URLs, pictures; and `cy_browser.c`, an earlier browser drawn by the ESP32 (used by `cyb_shot`) |
 | `cyapp/` | the Browser app for CyOS (`Browser.app` is kept built) |
 | `src/cy_browser_app.h` | Browser.app as a C array for the firmware, made by `cyapp/build.sh` |
 | `third_party/tjpgd/` | TJpgDec JPEG decoder (see THIRD_PARTY.md) |
-| `gate/` | the gate: radio protocol, fetching (`cy_gate.c`), pages for Browser (`cy_page.c`), HTML to WML (`cy_wml.c`) |
-| `docs/cywig.md` | the CyWIG radio and WAP protocol |
+| `gate/` | the gate: radio protocol, fetching and cookies (`cy_gate.c`), pages for Browser (`cy_page.c`) packed with `cy_deflate.c`, HTML to WML (`cy_wml.c`) |
+| `docs/cywig.md`, `docs/cywig-spec.md` | the CyWIG radio and WAP protocol, and the whole protocol as the Cybiko sees it |
 | `port/esp32/` | fetching and Wi-Fi on the ESP32 (esp_http_client, HTTPS with the certificate bundle) |
 | `host/` | fetching on a PC, through `curl` |
 | `tools/` | the CyOS app packer (`cybiko_mkapp.py`) and Cy archive code |
@@ -157,5 +166,6 @@ home page, edits fields, ticks boxes, picks from lists, sends forms
 (also ones longer than one radio packet), follows the next part of a long
 page and goes back to where it was. Pages came from local files there (the
 test machine has no direct Internet). The Xtreme's WAP browser still works
-with the gate. `make test` checks the gate's pages for both. Not yet tried
-on the board.
+with the gate. `make test` checks the gate's pages for both, packed parts
+(unpacked with the app's own `inflate.c`), cookies (against a small local
+server, `tests/cookie_server.py`) and CSS (`tests/pages/css.html`).
