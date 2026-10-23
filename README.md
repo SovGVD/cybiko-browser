@@ -62,9 +62,13 @@ it would work on a real Xtreme too, given a gate it can hear.
 
 ## The WAP gate (CyWIG)
 
-The whole protocol as the Cybiko sees it (radio packets, gate discovery,
-messages, both browsers' requests and the page format) is in
-[docs/cywig-spec.md](docs/cywig-spec.md).
+The Cybiko side of the gate (radio packets, gate discovery, messages, the
+WAP browser's requests, the original gate) is documented in
+[cybiko-docs](https://github.com/SovGVD/cybiko-docs): [cywig.md](https://github.com/SovGVD/cybiko-docs/blob/main/cywig.md) and
+[radio-protocol.md](https://github.com/SovGVD/cybiko-docs/blob/main/radio-protocol.md). Browser's own
+requests, the page format and the gate's short URLs are in
+[docs/cywig-spec.md](docs/cywig-spec.md); what this gate does on top of the
+protocol in [docs/cywig.md](docs/cywig.md).
 
 ![The Xtreme WAP browser through the gate](docs/images/wap.png)
 
@@ -91,7 +95,8 @@ or can't get online, it answers with this page instead (and says why).
 A page comes in at about 275 bytes a second (a full 5000-byte deck in about
 18 s), since every 87-byte part goes over the emulated radio and waits for
 the Cybiko's acknowledgement. What goes over the air, as found in CyOS 1.5
-and the WAP browser, is in [docs/cywig.md](docs/cywig.md).
+and the WAP browser, is in cybiko-docs'
+[cywig.md](https://github.com/SovGVD/cybiko-docs/blob/main/cywig.md).
 
 ## Keys
 
@@ -125,7 +130,7 @@ both.
 | `src/cy_browser_app.h` | Browser.app as a C array for the firmware, made by `cyapp/build.sh` |
 | `third_party/tjpgd/` | TJpgDec JPEG decoder (see THIRD_PARTY.md) |
 | `gate/` | the gate: radio protocol, fetching and cookies (`cy_gate.c`), pages for Browser (`cy_page.c`) packed with `cy_deflate.c`, HTML to WML (`cy_wml.c`) |
-| `docs/cywig.md`, `docs/cywig-spec.md` | the CyWIG radio and WAP protocol, and the whole protocol as the Cybiko sees it |
+| `docs/cywig.md`, `docs/cywig-spec.md` | what the gate does, and the Browser protocol (requests, page format, gate URLs); the CyWIG and radio protocols themselves are in [cybiko-docs](https://github.com/SovGVD/cybiko-docs) |
 | `port/esp32/` | fetching and Wi-Fi on the ESP32 (esp_http_client, HTTPS with the certificate bundle) |
 | `host/` | fetching on a PC, through `curl` |
 | `tools/` | the CyOS app packer (`cybiko_mkapp.py`) and Cy archive code |

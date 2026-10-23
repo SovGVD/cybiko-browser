@@ -1,8 +1,8 @@
 """CyOS archives (the "Cy" format of .app files and the flash file system):
 building them, with CyOS's own compression (method 2), and reading them.
 
-From Dragonfruit's tools/cybiko_cap.py, where the format is described in
-docs/cybiko-mp3-cartridge.md (4.2)."""
+From Dragonfruit's tools/cybiko_cap.py. The format is described in
+file-formats.md of cybiko-docs (https://github.com/SovGVD/cybiko-docs)."""
 import struct
 
 
