@@ -1,13 +1,11 @@
 /* cyusb_tcp: the USB port of an emulated Xtreme over TCP. See cyusb_tcp.h. */
 #define _POSIX_C_SOURCE 200809L
 #include "cyusb_tcp.h"
-#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
+#include "cy_sock.h"
 
 typedef struct {
     cyusb_dev_t dev;
@@ -18,10 +16,10 @@ static int put_all(int fd, const void *p, int n)
 {
     const char *c = p;
     while (n > 0) {
-        ssize_t r = send(fd, c, (size_t)n, 0);
+        int r = (int)send(fd, c, n, 0);
         if (r <= 0) return -1;
         c += r;
-        n -= (int)r;
+        n -= r;
     }
     return 0;
 }
@@ -30,10 +28,10 @@ static int get_all(int fd, void *p, int n)
 {
     char *c = p;
     while (n > 0) {
-        ssize_t r = recv(fd, c, (size_t)n, 0);
+        int r = (int)recv(fd, c, n, 0);
         if (r <= 0) return -1;
         c += r;
-        n -= (int)r;
+        n -= r;
     }
     return 0;
 }
@@ -94,19 +92,20 @@ cyusb_dev_t *cyusb_tcp_open(const char *where, char *err, int err_len)
     const char *colon = strrchr(where, ':');
     if (!colon) { snprintf(err, (size_t)err_len, "'%s' is not host:port", where); return NULL; }
     snprintf(host, sizeof host, "%.*s", (int)(colon - where), where);
+    cy_sock_init();
     struct addrinfo hints = { 0 }, *ai = NULL;
     hints.ai_socktype = SOCK_STREAM;
     int e = getaddrinfo(host[0] ? host : "127.0.0.1", colon + 1, &hints, &ai);
     if (e) { snprintf(err, (size_t)err_len, "%s: %s", where, gai_strerror(e)); return NULL; }
     int fd = -1;
     for (struct addrinfo *a = ai; a && fd < 0; a = a->ai_next) {
-        fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (fd >= 0 && connect(fd, a->ai_addr, a->ai_addrlen) < 0) { close(fd); fd = -1; }
+        fd = (int)socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (fd >= 0 && connect(fd, a->ai_addr, a->ai_addrlen) < 0) { cy_sock_close(fd); fd = -1; }
     }
     freeaddrinfo(ai);
     if (fd < 0) { snprintf(err, (size_t)err_len, "can't connect to %s", where); return NULL; }
     tcp_t *t = calloc(1, sizeof *t);
-    if (!t) { close(fd); snprintf(err, (size_t)err_len, "out of memory"); return NULL; }
+    if (!t) { cy_sock_close(fd); snprintf(err, (size_t)err_len, "out of memory"); return NULL; }
     t->fd = fd;
     t->dev.control = tcp_control;
     t->dev.bulk = tcp_bulk;
@@ -120,6 +119,6 @@ void cyusb_tcp_close(cyusb_dev_t *d)
 {
     if (!d) return;
     tcp_t *t = (tcp_t *)d;
-    close(t->fd);
+    cy_sock_close(t->fd);
     free(t);
 }
