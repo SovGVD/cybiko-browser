@@ -64,10 +64,11 @@ cyusb_dev_t *cyusb_libusb_open(char *err, int err_len)
     if (!u) { snprintf(err, (size_t)err_len, "out of memory"); return NULL; }
     int r = libusb_init(&u->ctx);
     if (r < 0) { snprintf(err, (size_t)err_len, "libusb: %s", libusb_strerror(r)); free(u); return NULL; }
-    u->h = libusb_open_device_with_vid_pid(u->ctx, CYUSB_VID, CYUSB_PID);
+    u->h = libusb_open_device_with_vid_pid(u->ctx, CYUSB_VID, CYUSB_PID_GATE);
+    if (!u->h) u->h = libusb_open_device_with_vid_pid(u->ctx, CYUSB_VID, CYUSB_PID);
     if (!u->h) {
-        snprintf(err, (size_t)err_len, "no Cybiko Xtreme (USB %04x:%04x) found, or no permission to open it",
-                 CYUSB_VID, CYUSB_PID);
+        snprintf(err, (size_t)err_len, "no Cybiko Xtreme (USB %04x:%04x or %04x) found, or no permission to open it",
+                 CYUSB_VID, CYUSB_PID_GATE, CYUSB_PID);
         libusb_exit(u->ctx);
         free(u);
         return NULL;
@@ -81,6 +82,10 @@ cyusb_dev_t *cyusb_libusb_open(char *err, int err_len)
         free(u);
         return NULL;
     }
+    struct libusb_device_descriptor dd;
+    if (!libusb_get_device_descriptor(libusb_get_device(u->h), &dd))
+        fprintf(stderr, "usb: Xtreme at %04x:%04x%s\n", dd.idVendor, dd.idProduct,
+                dd.idProduct == CYUSB_PID_GATE ? " (USB Gate running)" : "");
     u->dev.control = lu_control;
     u->dev.bulk = lu_bulk;
     u->dev.log = lu_log;

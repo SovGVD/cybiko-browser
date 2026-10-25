@@ -1,6 +1,13 @@
 /* cymcp_link: the PC end of CyOS's Multi Channel Protocol over USB. See
  * cymcp.h for the flow control. Nothing that arrives is dropped quietly:
- * frames the link cannot use are logged through the device's log. */
+ * frames the link cannot use are logged through the device's log.
+ *
+ * A new link can meet an Xtreme whose pipes are part way through: CyOS
+ * keeps its sequence numbers when only the PC's side starts again (a
+ * program reopening the device, or USB Gate putting the Xtreme back on
+ * the bus under another USB ID). So until a pipe has moved a frame, the
+ * link takes the Xtreme's numbers: the first data frame it is sent, or
+ * the frame the Xtreme asks for. */
 #include "cymcp.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -17,6 +24,7 @@ typedef struct {
     /* receiving (Xtreme -> PC) */
     uint8_t want;          /* next sequence number we ask for */
     uint8_t listening;
+    uint8_t got_any;       /* a frame was taken since the link opened */
     unsigned asked_at;
     unsigned heard_at;     /* last frame of any kind on the pipe, 0 never */
     uint8_t *buf;
@@ -25,6 +33,7 @@ typedef struct {
     uint8_t seq;           /* sequence number of the frame being sent */
     int asked;             /* last 02 N heard from the Xtreme, -1 none */
     int done3;             /* last 03 N heard, -1 none */
+    uint8_t sent_any;      /* a frame was acknowledged since the link opened */
 } pipe_t;
 
 struct cymcp_link {
@@ -109,6 +118,10 @@ static void got_data(cymcp_link_t *l)
         lg(l, "data frame on pipe %d, which nobody reads (%d bytes, seq %d)", f->pipe, f->len, f->seq);
         return;
     }
+    if (f->seq != p->want && !p->got_any) {
+        lg(l, "pipe %d: the Xtreme is at frame %d, taking it from there", f->pipe, f->seq);
+        p->want = f->seq;
+    }
     if (f->seq != p->want) {
         /* Sent again for an older ask of ours that was still queued on the
          * Xtreme: counted in stats.dup, it already arrived once. */
@@ -127,6 +140,7 @@ static void got_data(cymcp_link_t *l)
     p->count += f->len;
     l->st.data_in += f->len;
     p->want++;
+    p->got_any = 1;
     ask(l, f->pipe);
 }
 
@@ -142,9 +156,11 @@ static void got_control(cymcp_link_t *l)
          * the next one on this pipe starts again from frame 0. */
         lg(l, "pipe %d closed by the Xtreme", f->pipe);
         p->seq = 0; p->want = 0; p->asked = p->done3 = -1;
+        p->got_any = p->sent_any = 1;
     } else if (kind == 4) {
         lg(l, "pipe %d reset by the Xtreme", f->pipe);
         p->seq = 0; p->want = 0; p->asked = p->done3 = -1;
+        p->got_any = p->sent_any = 1;
     } else {
         l->st.unexpected++;
         char hex[16] = "";
@@ -191,6 +207,11 @@ int cymcp_write(cymcp_link_t *l, int pipe, const void *data, int len, unsigned t
         unsigned start = now(l), sent_at = 0;
         int sent = 0;
         for (;;) {
+            if (!p->sent_any && p->asked >= 0 && p->asked != seq && p->asked != (uint8_t)(seq + 1)) {
+                lg(l, "pipe %d: the Xtreme asks for frame %d, going on from there", pipe, p->asked);
+                seq = (uint8_t)p->asked;
+                sent = 0;
+            }
             if (p->asked == (uint8_t)(seq + 1) || p->done3 == seq) break;
             if (!sent || (p->asked == seq && now(l) - sent_at >= 100) || now(l) - sent_at >= RESEND_MS) {
                 if (sent) { l->st.resent++; }
@@ -209,6 +230,7 @@ int cymcp_write(cymcp_link_t *l, int pipe, const void *data, int len, unsigned t
         }
         p->seq = seq + 1;
         p->done3 = -1;
+        p->sent_any = 1;
         l->st.data_out += n;
         done += n;
     }

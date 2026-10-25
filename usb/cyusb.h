@@ -1,12 +1,16 @@
 #pragma once
 /* A USB device as the PC side of the Cybiko Xtreme's USB link sees it:
  * blocking control and bulk transfers, like libusb's synchronous calls.
- * cyusb_libusb.c opens a real Xtreme (VID 0B66, PID 0041) through
- * libusb; Dragonfruit's cybiko_host gives an emulated one. */
+ * cyusb_libusb.c opens a real Xtreme (VID 0B66, PID 0041, or 0042 while
+ * USB Gate runs) through libusb; Dragonfruit's cybiko_host gives an
+ * emulated one. */
 #include <stdint.h>
 
 #define CYUSB_VID 0x0b66
 #define CYUSB_PID 0x0041          /* CyOS running; 0x0040 is the boot ROM */
+#define CYUSB_PID_GATE 0x0042     /* CyOS with cybiko-cywig's USB Gate running: the
+                                     same device, with the descriptors that get
+                                     it WinUSB on Windows by itself */
 
 /* Results below 0 */
 #define CYUSB_ETIMEOUT (-1)
