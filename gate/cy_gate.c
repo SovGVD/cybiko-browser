@@ -56,6 +56,8 @@
 #define BEACON_MS 3000
 #define RETRY_MS 400
 #define TRIES 10
+#define MSG_PART 1024               /* message mode: a part per message, as VCyWIG did */
+#define MSG_WAIT_MS 45000           /* message mode: longest wait for a delivery */
 #define MAX_PAGE (256 * 1024)       /* biggest web page fetched */
 #define FETCH_MS 45000              /* the WAP browser gives up after 60 s */
 #define ALIASES 512                 /* short URLs handed out */
@@ -251,6 +253,7 @@ void cy_gate_seal(uint8_t *pkt, size_t len)
 
 static void send(cy_gate_t *g, uint8_t *pkt, size_t len)
 {
+    if (!g->host.rf_send) return;   /* message mode */
     cy_gate_seal(pkt, len);
     g->host.rf_send(g->host.user, pkt, len, g->channel);
 }
@@ -289,12 +292,40 @@ static const char *process(const cy_gate_t *g) { return g->app ? APP_PROCESS : W
 /* The most of the page one message part takes. */
 static size_t part_room(const cy_gate_t *g)
 {
+    if (g->host.msg_send) return MSG_PART;  /* CyOS splits it for the air */
     return LONG_DATA - HEAD - (2 + 2 + 4 + 4 + strlen(process(g)) + 1 + 1);
+}
+
+static void finish(cy_gate_t *g);
+
+static void send_part_msg(cy_gate_t *g)
+{
+    uint32_t p0, p1 = 0;
+    size_t part = 0;
+    if (g->error) {
+        p0 = (uint32_t)g->number << 16 | WAP_ERROR;
+        p1 = g->status;
+    } else {
+        part = g->wml_len - g->wml_sent;
+        if (part > part_room(g)) part = part_room(g);
+        p0 = (uint32_t)g->number << 16 | WAP_PART;
+        p1 = (uint32_t)g->wml_len << 16 | (uint32_t)part;
+    }
+    g->tx_busy = true;
+    g->tx_query = false;
+    g->tries = TRIES;               /* cy_gate_msg_done, or give up at tx_at */
+    g->tx_at = g->now + MSG_WAIT_MS;
+    if (!g->host.msg_send(g->host.user, g->to, MSG_WAP, p0, p1, process(g),
+                          g->error ? NULL : (const uint8_t *)g->wml + g->wml_sent, part)) {
+        logf_(g, "could not hand the part for %08x over", (unsigned)g->to);
+        finish(g);
+    }
 }
 
 static void send_part(cy_gate_t *g)
 {
     uint8_t *m = g->tx + HEAD;
+    if (g->host.msg_send) { send_part_msg(g); return; }
     if (++g->tx_number == 0) g->tx_number = 1;
     /* Message number 0 is delivered right away and acknowledged with code 0;
      * others get "got it" first and need a query for "delivered", which takes
@@ -1122,6 +1153,8 @@ static bool own_page(cy_gate_t *g, const char *url)
     return true;
 }
 
+static void wap_request(cy_gate_t *g, uint32_t from, uint32_t p0, uint32_t p1, const uint8_t *data, size_t dl);
+
 /* A message for the gate. */
 static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
 {
@@ -1145,18 +1178,24 @@ static void message(cy_gate_t *g, uint32_t from, const uint8_t *m, size_t len)
               id == 0x47 ? " (CyOS's gate check, needs no answer)" : "");
         return;
     }
+    wap_request(g, from, p0, p1, m + n, dl);
+}
+
+/* A page request (msg 1022), however it came. */
+static void wap_request(cy_gate_t *g, uint32_t from, uint32_t p0, uint32_t p1, const uint8_t *data, size_t dl)
+{
     const bool app = (p0 & 0xff) == APP_GET;
     if ((p0 & 0xffff) != WAP_GET && (p0 & 0xffff) != WAP_POST && !app) {
         logf_(g, "WAP request %08x from %08x not handled", (unsigned)p0, (unsigned)from);
         return;
     }
     char url[1024];
-    size_t ul = strnlen((const char *)m + n, dl);
-    snprintf(url, sizeof url, "%.*s", (int)ul, (const char *)m + n);
+    size_t ul = strnlen((const char *)data, dl);
+    snprintf(url, sizeof url, "%.*s", (int)ul, (const char *)data);
     /* a post's form data would follow the URL */
     char body[128];
     const bool post = (p0 & 0xffff) == WAP_POST && ul + 1 < dl;
-    if (post) snprintf(body, sizeof body, "%.*s", (int)(dl - ul - 1), (const char *)m + n + ul + 1);
+    if (post) snprintf(body, sizeof body, "%.*s", (int)(dl - ul - 1), (const char *)data + ul + 1);
     request(g, from, (uint16_t)p1, url, post ? body : NULL, app, app && (p0 & APP_BIG), app && (p0 & APP_PICS),
             app && (p0 & APP_ZIP));
 }
@@ -1259,7 +1298,7 @@ uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
     }
     if ((int32_t)(now_ms - g->next_beacon) >= 0) {
         g->next_beacon = now_ms + BEACON_MS;
-        beacon(g);
+        if (!g->host.msg_send) beacon(g);   /* message mode: CyOS's gate mode does it */
     }
     if (g->state == FETCH) fetch_step(g);
     if (g->state == PICS) pics_step(g);
@@ -1277,6 +1316,33 @@ uint32_t cy_gate_poll(cy_gate_t *g, uint32_t now_ms)
     uint32_t wait = g->next_beacon - now_ms;
     if (g->tx_busy && g->tx_at - now_ms < wait) wait = g->tx_at - now_ms;
     return wait;
+}
+
+void cy_gate_msg_in(cy_gate_t *g, uint32_t from, uint16_t msgid, uint32_t p0, uint32_t p1,
+                    const uint8_t *data, size_t len)
+{
+    if (msgid != MSG_WAP) {
+        logf_(g, "msg %04x from %08x not handled%s", msgid, (unsigned)from,
+              msgid == 0x47 ? " (CyOS's gate check, needs no answer)" : "");
+        return;
+    }
+    while (len && data[len - 1] == 0 && len > strnlen((const char *)data, len) + 1) len--;
+    wap_request(g, from, p0, p1, data, len);
+}
+
+void cy_gate_msg_done(cy_gate_t *g, int result)
+{
+    if (!g->tx_busy) {
+        logf_(g, "delivery result %d with nothing being sent", result);
+        return;
+    }
+    if (result == CY_GATE_DELIVERED) part_delivered(g);
+    else {
+        logf_(g, "%08x: %s", (unsigned)g->to,
+              result == CY_GATE_NOBODY ? (g->app ? "no Browser running" : "no WAP browser running")
+                                       : "the part did not get there");
+        finish(g);
+    }
 }
 
 void cy_gate_set_fonts(cy_gate_t *g, const uint8_t *flash, size_t len)
