@@ -82,6 +82,11 @@ int cymcp_write(cymcp_link_t *l, int pipe, const void *data, int len, unsigned t
  * came), or < 0. */
 int cymcp_read(cymcp_link_t *l, int pipe, void *buf, int max, unsigned timeout_ms);
 
+/* When the Xtreme last sent a frame of any kind (data, a repeat, an ask
+ * or an acknowledgement) on a pipe, in the device's milliseconds; 0 never.
+ * Tells a busy program on the Xtreme from one that is gone. */
+unsigned cymcp_heard(cymcp_link_t *l, int pipe);
+
 /* Bytes waiting on a pipe. */
 int cymcp_available(cymcp_link_t *l, int pipe);
 

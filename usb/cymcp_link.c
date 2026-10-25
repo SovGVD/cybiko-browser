@@ -18,6 +18,7 @@ typedef struct {
     uint8_t want;          /* next sequence number we ask for */
     uint8_t listening;
     unsigned asked_at;
+    unsigned heard_at;     /* last frame of any kind on the pipe, 0 never */
     uint8_t *buf;
     int head, count;
     /* sending (PC -> Xtreme) */
@@ -167,6 +168,7 @@ int cymcp_poll(cymcp_link_t *l, unsigned ms)
             if (k < 0) { l->st.bad++; lg(l, "frame thrown away: %s", l->rx.err); }
             if (k <= 0) continue;
             l->st.frames_in++;
+            l->p[l->f.pipe].heard_at = now(l) ? now(l) : 1;
             if (l->f.type == CYMCP_DATA) got_data(l);
             else if (l->f.type == CYMCP_CONTROL) got_control(l);
             else { l->st.unexpected++; lg(l, "frame of type %02x on pipe %d", l->f.type, l->f.pipe); }
@@ -214,6 +216,8 @@ int cymcp_write(cymcp_link_t *l, int pipe, const void *data, int len, unsigned t
 }
 
 int cymcp_available(cymcp_link_t *l, int pipe) { return l->p[pipe & 0xff].count; }
+
+unsigned cymcp_heard(cymcp_link_t *l, int pipe) { return l->p[pipe & 0xff].heard_at; }
 
 int cymcp_read(cymcp_link_t *l, int pipe, void *buf, int max, unsigned timeout_ms)
 {
